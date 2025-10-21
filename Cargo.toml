@@ -1,0 +1,12 @@
+[package]
+name = "jvm-rs"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+spacetimedb-sdk = { git = "https://github.com/infernap12/SpacetimeDB", branch = "class_de" }
+#spacetimedb-core = { git = "https://github.com/infernap12/SpacetimeDB", branch = "class_de" }
+#spacetimedb-lib = { git = "https://github.com/infernap12/SpacetimeDB", branch = "class_de" }
+#spacetimedb-sats = { git = "https://github.com/infernap12/SpacetimeDB", branch = "class_de" }
+#spacetimedb-client-api-messages = { git = "https://github.com/infernap12/SpacetimeDB", branch = "class_de" }
+#bindings = { git = "https://github.com/infernap12/bitcraft-bindings", branch = "class_de" }
