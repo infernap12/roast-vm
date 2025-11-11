@@ -448,7 +448,7 @@ pub(crate) struct Bytecode {
 	pub code: Vec<Ops>,
 }
 
-type CONSTANT_POOL = [CpInfo];
+
 
 pub trait ConstantPoolExt {
 	fn get_constant(&self, index: u16) -> Option<&CpInfo>;
@@ -563,16 +563,6 @@ impl ConstantPoolExt for [CpInfo] {
 			name,
 			desc,
 		})
-	}
-}
-
-struct ConstantPool<'a>(&'a [CpInfo]);
-
-impl Deref for ConstantPool {
-	type Target = [CpInfo];
-
-	fn deref(&self) -> &Self::Target {
-		self.0
 	}
 }
 

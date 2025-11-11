@@ -11,7 +11,6 @@ use itertools::Itertools;
 use vm::Vm;
 use crate::attributes::{Attribute, CodeAttribute, Ops};
 use crate::class_file::{Bytecode, ClassFile, ClassFlags, ConstantPoolExt, CpInfo, FieldFlags, MethodFlags};
-use crate::JVM_ACC::*;
 use crate::object::Object;
 use crate::thread::VmThread;
 
