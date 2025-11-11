@@ -4,9 +4,15 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-spacetimedb-sdk = { git = "https://github.com/infernap12/SpacetimeDB", branch = "class_de" }
-#spacetimedb-core = { git = "https://github.com/infernap12/SpacetimeDB", branch = "class_de" }
-#spacetimedb-lib = { git = "https://github.com/infernap12/SpacetimeDB", branch = "class_de" }
-#spacetimedb-sats = { git = "https://github.com/infernap12/SpacetimeDB", branch = "class_de" }
-#spacetimedb-client-api-messages = { git = "https://github.com/infernap12/SpacetimeDB", branch = "class_de" }
-#bindings = { git = "https://github.com/infernap12/bitcraft-bindings", branch = "class_de" }
+deku = { version = "0.20.0", features = ["logging"] }
+deku_derive = "0.20.0"
+log = "0.4.28"
+env_logger = "0.11.8"
+itertools = "0.14.0"
+sevenz-rust2 = { version = "0.19.3", features = ["brotli", "zstd"] }
+
+[build-dependencies]
+bindgen = "0.72.1"
+
+[lints.rust]
+missing_docs = "warn"
