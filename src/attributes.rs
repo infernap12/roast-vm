@@ -1,8 +1,10 @@
 use std::fmt::Display;
+use std::ops::Deref;
 use deku_derive::DekuRead;
 use deku::DekuContainerRead;
 use log::trace;
-use crate::class_file::{ClassFile, CpInfo};
+use crate::class_file::{ClassFile, Constant, ConstantPoolEntry};
+use crate::class_file::constant_pool::ConstantPoolExt;
 
 #[derive(Clone, PartialEq, Debug, DekuRead)]
 #[deku(ctx = "_endian: deku::ctx::Endian", endian = "big")]
@@ -18,7 +20,7 @@ pub struct AttributeInfo {
 #[derive(Clone, PartialEq, Debug)]
 pub enum Attribute {
 	// "Critical"
-	ConstantValue,
+	ConstantValue(Constant),
 	Code(CodeAttribute),
 	StackMapTable(Vec<u8>),
 	BootstrapMethods,
@@ -357,10 +359,14 @@ pub enum Ops {
 	// control
 	#[deku(id = 0xa7)]
 	goto(u16),
+
+	// discontinued
 	#[deku(id = 0xa8)]
 	jsr(u16),
 	#[deku(id = 0xa9)]
 	ret(u8),
+	//
+
 	#[deku(id = 0xaa)]
 	tableswitch,
 	#[deku(id = 0xab)]
@@ -441,64 +447,67 @@ pub enum Ops {
 // }
 
 impl AttributeInfo {
-	pub fn parse_attribute(&self, constant_pool: &[CpInfo]) -> Option<Attribute> {
-		let name = crate::class_file::pool_get_string(constant_pool, self.attribute_name_index)?;
-		trace!("Parsing attribute with name: {}", name);
-
-
-		match name.as_ref() {
-			"Code" => {
-				let (_, mut code_attr) = CodeAttribute::from_bytes((&self.info.as_slice(), 0)).ok()?;
-				// Recursively interpret nested attributes
-				for attr in &mut code_attr.attributes {
-					attr.interpreted = attr.parse_attribute(constant_pool);
-				}
-				Some(Attribute::Code(code_attr))
-			}
-			"SourceFile" => {
-				if self.info.len() >= 2 {
-					let source_file_index = u16::from_be_bytes([self.info[0], self.info[1]]);
-					Some(Attribute::SourceFile(source_file_index))
-				} else {
-					None
-				}
-			}
-			"LineNumberTable" => {
-				let (_, lnt) = LineNumberTableAttribute::from_bytes((&self.info.as_slice(), 0)).ok()?;
-				Some(Attribute::LineNumberTable(lnt))
-			}
-			"StackMapTable" => {
-				Some(Attribute::StackMapTable(self.info.clone()))
-			}
-			"Exceptions" => {
-				Some(Attribute::Exceptions(self.info.clone()))
-			}
-			"InnerClasses" => {
-				Some(Attribute::InnerClasses(self.info.clone()))
-			}
-			"Signature" => {
-				if self.info.len() >= 2 {
-					let signature_index = u16::from_be_bytes([self.info[0], self.info[1]]);
-					Some(Attribute::Signature(signature_index))
-				} else {
-					None
-				}
-			}
-			"LocalVariableTable" => {
-				let (_, lvt) = LocalVariableTableAttribute::from_bytes((&self.info.as_slice(), 0)).ok()?;
-				Some(Attribute::LocalVariableTable(lvt))
-			}
-			_ => Some(Attribute::Unknown(name.to_string(), self.info.clone())),
-		}
-	}
+	// pub fn parse_attribute(&self, constant_pool: &[ConstantPoolEntry]) -> Option<Attribute> {
+	// 	let name = crate::class_file::pool_get_string(constant_pool, self.attribute_name_index)?;
+	// 	trace!("Parsing attribute with name: {}", name);
+	//
+	//
+	// 	match name.as_ref() {
+	// 		"Code" => {
+	// 			let (_, mut code_attr) = CodeAttribute::from_bytes((&self.info.as_slice(), 0)).ok()?;
+	// 			// Recursively interpret nested attributes
+	// 			for attr in &mut code_attr.attributes {
+	// 				attr.interpreted = attr.parse_attribute(constant_pool);
+	// 			}
+	// 			Some(Attribute::Code(code_attr))
+	// 		}
+	// 		"SourceFile" => {
+	// 			if self.info.len() >= 2 {
+	// 				let source_file_index = u16::from_be_bytes([self.info[0], self.info[1]]);
+	// 				Some(Attribute::SourceFile(source_file_index))
+	// 			} else {
+	// 				None
+	// 			}
+	// 		}
+	// 		"LineNumberTable" => {
+	// 			let (_, lnt) = LineNumberTableAttribute::from_bytes((&self.info.as_slice(), 0)).ok()?;
+	// 			Some(Attribute::LineNumberTable(lnt))
+	// 		}
+	// 		"StackMapTable" => {
+	// 			Some(Attribute::StackMapTable(self.info.clone()))
+	// 		}
+	// 		"Exceptions" => {
+	// 			Some(Attribute::Exceptions(self.info.clone()))
+	// 		}
+	// 		"InnerClasses" => {
+	// 			Some(Attribute::InnerClasses(self.info.clone()))
+	// 		}
+	// 		"Signature" => {
+	// 			if self.info.len() >= 2 {
+	// 				let signature_index = u16::from_be_bytes([self.info[0], self.info[1]]);
+	// 				Some(Attribute::Signature(signature_index))
+	// 			} else {
+	// 				None
+	// 			}
+	// 		}
+	// 		"LocalVariableTable" => {
+	// 			let (_, lvt) = LocalVariableTableAttribute::from_bytes((&self.info.as_slice(), 0)).ok()?;
+	// 			Some(Attribute::LocalVariableTable(lvt))
+	// 		}
+	// 		_ => Some(Attribute::Unknown(name.to_string(), self.info.clone())),
+	// 	}
+	// }
 
 	/// Get the interpreted attribute, parsing if necessary
 	pub fn get(&self, class_file: &ClassFile) -> Option<Attribute> {
-		if let Some(ref attr) = self.interpreted {
-			Some(attr.clone())
-		} else {
-			self.parse_attribute(class_file.constant_pool.as_ref())
-		}
+		class_file.constant_pool.parse_attribute(self.deref().clone()).ok()
+
+
+		// if let Some(ref attr) = self.interpreted {
+		// 	Some(attr.clone())
+		// } else {
+		// 	self.parse_attribute(class_file.constant_pool.as_ref())
+		// }
 	}
 }
 

@@ -1,4 +1,5 @@
 use std::sync::{Arc, Mutex};
+use crate::class_file::ClassFile;
 use crate::class_loader::ClassLoader;
 use crate::Frame;
 use crate::thread::VmThread;
@@ -6,22 +7,20 @@ use crate::thread::VmThread;
 // struct AbstractObject<'a> {}
 pub struct Vm {
 	// for now, model just a single thread
-	pub thread: Vec<VmThread>,
+	pub thread: Mutex<Vec<Arc<VmThread>>>,
 	pub loader: Arc<Mutex<ClassLoader>>
 }
 
 impl Vm {
-	pub fn new() -> Self {
-		Self {
+	// start vm, loading main from classfile
+	pub fn new(what: &str) -> Arc<Self> {
+		let vm = Arc::new(Self {
 			loader: Arc::new(Mutex::from(ClassLoader::default())),
-			thread: Vec::new(),
-		}
+			thread: Mutex::new(Vec::new()),
+		});
+		let thread = Arc::new(VmThread::new(vm.clone(), None));
+		vm.thread.lock().unwrap().push(thread.clone());
+		thread.invoke_main(what, thread.clone());
+		vm.clone()
 	}
-
-	pub fn get_or_resolve_class(&self, what: &str) -> () {
-		let class_file = self.loader.lock().unwrap().get_or_load(what).unwrap();
-		self.init(class_file)
-	}
-
-	fn init() -> () {}
 }

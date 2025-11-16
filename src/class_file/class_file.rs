@@ -1,14 +1,16 @@
+use crate::attributes::{Attribute, AttributeInfo, CodeAttribute, Ops};
+use crate::class_file::constant_pool::{ConstantPoolError, ConstantPoolExt, ConstantPoolOwned};
+use crate::{BaseType, FieldType, MethodDescriptor, Value};
 use deku::ctx::Endian::Big;
+use deku::{DekuContainerRead, DekuError};
+use deku_derive::{DekuRead, DekuWrite};
+use itertools::Itertools;
 use std::borrow::Cow;
 use std::fmt;
+use std::fmt::{Display, Formatter};
 use std::ops::Deref;
 use std::str::Chars;
 use std::sync::Arc;
-use itertools::Itertools;
-use deku_derive::{DekuRead, DekuWrite};
-use deku::{DekuContainerRead, DekuError};
-use crate::attributes::{Attribute, AttributeInfo, CodeAttribute, Ops};
-use crate::{BaseType, FieldType, MethodDescriptor, Value};
 
 #[derive(Debug, PartialEq, DekuRead)]
 #[deku(magic = b"\xCA\xFE\xBA\xBE", endian = "big")]
@@ -17,10 +19,10 @@ pub struct ClassFile {
 	pub major_version: u16,
 	constant_pool_count: u16,
 	#[deku(
-		until = "CpInfo::weighted_count(*constant_pool_count - 1)",
-		map = "|v: Vec<CpInfo>| -> Result<_, DekuError> { Ok(Arc::new(v)) }"
+		until = "ConstantPoolEntry::weighted_count(*constant_pool_count - 1)",
+		map = "|v: Vec<ConstantPoolEntry>| -> Result<_, DekuError> { Ok(Arc::new(v)) }"
 	)]
-	pub constant_pool: Arc<Vec<CpInfo>>,
+	pub constant_pool: Arc<ConstantPoolOwned>,
 	pub access_flags: u16,
 	pub this_class: u16,
 	pub super_class: u16,
@@ -40,7 +42,7 @@ pub struct ClassFile {
 
 #[derive(Clone, PartialEq, Debug, DekuRead)]
 #[deku(id_type = "u8", ctx = "_endian: deku::ctx::Endian", endian = "big")]
-pub enum CpInfo {
+pub enum ConstantPoolEntry {
 	#[deku(id = 0x01)]
 	Utf8(ConstantUtf8Info),
 	#[deku(id = 0x03)]
@@ -74,15 +76,15 @@ pub enum CpInfo {
 	#[deku(id = 19)]
 	Module(ConstantModuleInfo),
 	#[deku(id = 20)]
-	Package(ConstantPackageInfo)
+	Package(ConstantPackageInfo),
 }
 
-impl CpInfo {
+impl ConstantPoolEntry {
 	fn weighted_count(target: u16) -> impl FnMut(&Self) -> bool {
 		let mut count = 0;
 		move |entry: &Self| {
 			count += match entry {
-				CpInfo::Long(_) | CpInfo::Double(_) => 2,
+				ConstantPoolEntry::Long(_) | ConstantPoolEntry::Double(_) => 2,
 				_ => 1,
 			};
 			count >= target as usize
@@ -116,8 +118,8 @@ pub struct MethodInfo {
 #[deku(ctx = "_endian: deku::ctx::Endian", endian = "big")]
 pub struct ConstantUtf8Info {
 	pub length: u16,
-	#[deku(count="length")]
-	pub bytes: Vec<u8>
+	#[deku(count = "length")]
+	pub bytes: Vec<u8>,
 }
 
 #[derive(Clone, PartialEq, Debug, DekuRead)]
@@ -145,6 +147,14 @@ pub struct ConstantMethodrefInfo {
 #[deku(ctx = "_endian: deku::ctx::Endian", endian = "big")]
 pub struct ConstantClassInfo {
 	pub name_index: u16,
+}
+
+impl Deref for ConstantClassInfo {
+	type Target = u16;
+
+	fn deref(&self) -> &Self::Target {
+		&self.name_index
+	}
 }
 
 #[derive(Clone, PartialEq, Debug, DekuRead)]
@@ -203,14 +213,19 @@ pub struct ConstantPackageInfo {
 impl fmt::Display for ClassFile {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		writeln!(f, "Class File Information:")?;
-		writeln!(f, "  Version: {}.{}", self.major_version, self.minor_version)?;
+		writeln!(
+			f,
+			"  Version: {}.{}",
+			self.major_version, self.minor_version
+		)?;
 		writeln!(f, "  Access Flags: 0x{:04X}", self.access_flags)?;
 		writeln!(f, "  This Class: #{}", self.this_class)?;
 		writeln!(f, "  Super Class: #{}", self.super_class)?;
 		writeln!(f, "\nConstant Pool ({} entries):", self.constant_pool.len())?;
 		for (i, entry) in self.constant_pool().iter().enumerate() {
-			if let Some(entry_value) = entry
-			{ writeln!(f, "  #{}: {}", i, entry_value)?; }
+			if let Some(entry_value) = entry {
+				writeln!(f, "  #{}: {}", i, entry_value)?;
+			}
 		}
 		writeln!(f, "\nInterfaces ({}):", self.interfaces.len())?;
 		for interface in &self.interfaces {
@@ -218,103 +233,155 @@ impl fmt::Display for ClassFile {
 		}
 		writeln!(f, "\nFields ({}):", self.fields.len())?;
 		for (i, field) in self.fields.iter().enumerate() {
-			let string_name = self.get_string(field.name_index).unwrap();
+			let string_name = &self.constant_pool.get_string(field.name_index).unwrap();
 			writeln!(f, "  [{}:{}] {}", i, string_name, field)?;
 		}
 		writeln!(f, "\nMethods ({}):", self.methods.len())?;
 		for (i, method) in self.methods.iter().enumerate() {
-			let string_name = self.get_string(method.name_index).unwrap();
+			let string_name = self.constant_pool.get_string(method.name_index).unwrap();
 			writeln!(f, "  [{}:{}] {}", i, string_name, method)?;
 			for attribute in &method.attributes {
 				write!(f, "  ")?;
-				self.format_attribute(f, attribute).expect("TODO: panic message");
+				self.format_attribute(f, attribute)
+					.expect("TODO: panic message");
 				// writeln!(f, "  {}", attribute.get(self).unwrap())?
 			}
 		}
 		writeln!(f, "\nAttributes ({}):", self.attributes.len())?;
 		for (i, attr) in self.attributes.iter().enumerate() {
-			writeln!(f, "  [{}] name_index=#{}, length={}::: {:?}", i, attr.attribute_name_index, attr.attribute_length, attr.get(self).unwrap())?;
+			writeln!(
+				f,
+				"  [{}] name_index=#{}, length={}::: {:?}",
+				i,
+				attr.attribute_name_index,
+				attr.attribute_length,
+				attr.get(self).unwrap()
+			)?;
 		}
 		Ok(())
 	}
-
-
 }
 
-impl fmt::Display for CpInfo {
+impl fmt::Display for ConstantPoolEntry {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		match self {
-			CpInfo::Utf8(info) => {
+			ConstantPoolEntry::Utf8(info) => {
 				let s = String::from_utf8_lossy(&info.bytes);
 				write!(f, "Utf8 \"{}\"", s)
 			}
-			CpInfo::Integer(val) => write!(f, "Integer {}", val),
-			CpInfo::Float(val) => write!(f, "Float {}", val),
-			CpInfo::Long(val) => write!(f, "Long {}", val),
-			CpInfo::Double(val) => write!(f, "Double {}", val),
-			CpInfo::Class(info) => write!(f, "Class #{}", info.name_index),
-			CpInfo::String(info) => write!(f, "String #{}", info.string_index),
-			CpInfo::FieldRef(info) => write!(f, "FieldRef #{}.#{}", info.class_index, info.name_and_type_index),
-			CpInfo::MethodRef(info) => write!(f, "MethodRef #{}.#{}", info.class_index, info.name_and_type_index),
-			CpInfo::InterfaceMethodRef(info) => write!(f, "InterfaceMethodRef #{}.#{}", info.class_index, info.name_and_type_index),
-			CpInfo::NameAndType(info) => write!(f, "NameAndType #{}:#{}", info.name_index, info.descriptor_index),
-			CpInfo::MethodHandle(info) => write!(f, "MethodHandle kind={} #{}", info.reference_kind, info.reference_index),
-			CpInfo::MethodType(info) => write!(f, "MethodType #{}", info.descriptor_index),
-			CpInfo::Dynamic(info) => write!(f, "Dynamic #{}.#{}", info.bootstrap_method_attr_index, info.name_and_type_index),
-			CpInfo::InvokeDynamic(info) => write!(f, "InvokeDynamic #{}.#{}", info.bootstrap_method_attr_index, info.name_and_type_index),
-			CpInfo::Module(info) => write!(f, "Module #{}", info.name_index),
-			CpInfo::Package(info) => write!(f, "Package #{}", info.name_index),
+			ConstantPoolEntry::Integer(val) => write!(f, "Integer {}", val),
+			ConstantPoolEntry::Float(val) => write!(f, "Float {}", val),
+			ConstantPoolEntry::Long(val) => write!(f, "Long {}", val),
+			ConstantPoolEntry::Double(val) => write!(f, "Double {}", val),
+			ConstantPoolEntry::Class(info) => write!(f, "Class #{}", info.name_index),
+			ConstantPoolEntry::String(info) => write!(f, "String #{}", info.string_index),
+			ConstantPoolEntry::FieldRef(info) => write!(
+				f,
+				"FieldRef #{}.#{}",
+				info.class_index, info.name_and_type_index
+			),
+			ConstantPoolEntry::MethodRef(info) => write!(
+				f,
+				"MethodRef #{}.#{}",
+				info.class_index, info.name_and_type_index
+			),
+			ConstantPoolEntry::InterfaceMethodRef(info) => write!(
+				f,
+				"InterfaceMethodRef #{}.#{}",
+				info.class_index, info.name_and_type_index
+			),
+			ConstantPoolEntry::NameAndType(info) => write!(
+				f,
+				"NameAndType #{}:#{}",
+				info.name_index, info.descriptor_index
+			),
+			ConstantPoolEntry::MethodHandle(info) => write!(
+				f,
+				"MethodHandle kind={} #{}",
+				info.reference_kind, info.reference_index
+			),
+			ConstantPoolEntry::MethodType(info) => {
+				write!(f, "MethodType #{}", info.descriptor_index)
+			}
+			ConstantPoolEntry::Dynamic(info) => write!(
+				f,
+				"Dynamic #{}.#{}",
+				info.bootstrap_method_attr_index, info.name_and_type_index
+			),
+			ConstantPoolEntry::InvokeDynamic(info) => write!(
+				f,
+				"InvokeDynamic #{}.#{}",
+				info.bootstrap_method_attr_index, info.name_and_type_index
+			),
+			ConstantPoolEntry::Module(info) => write!(f, "Module #{}", info.name_index),
+			ConstantPoolEntry::Package(info) => write!(f, "Package #{}", info.name_index),
 		}
 	}
 }
 
 impl fmt::Display for FieldInfo {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		write!(f, "flags=0x{:04X}, name=#{}, descriptor=#{}, attrs={}",
-			   self.access_flags, self.name_index, self.descriptor_index, self.attributes.len())
+		write!(
+			f,
+			"flags=0x{:04X}, name=#{}, descriptor=#{}, attrs={}",
+			self.access_flags,
+			self.name_index,
+			self.descriptor_index,
+			self.attributes.len()
+		)
 	}
 }
 
 impl fmt::Display for MethodInfo {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		let attrs: Vec<_> = self.attributes.iter().map(|x| { x.attribute_name_index }).collect();
-		write!(f, "flags=0x{:04X}, name=#{}, descriptor=#{}, attrs={}:{:?}",
-			   self.access_flags, self.name_index, self.descriptor_index, self.attributes.len(), attrs)
+		let attrs: Vec<_> = self
+			.attributes
+			.iter()
+			.map(|x| x.attribute_name_index)
+			.collect();
+		write!(
+			f,
+			"flags=0x{:04X}, name=#{}, descriptor=#{}, attrs={}:{:?}",
+			self.access_flags,
+			self.name_index,
+			self.descriptor_index,
+			self.attributes.len(),
+			attrs
+		)
 	}
 }
 
 impl ClassFile {
-
 	/// Parse with interpreted attributes
-	pub fn from_bytes_interpreted(input: (&[u8], usize)) -> Result<((&[u8], usize), Self), DekuError> {
-		let (rest, mut class_file) = Self::from_bytes(input)?;
-
-		// Interpret all attributes in-place
-		for field in &mut class_file.fields {
-			for attr in &mut field.attributes {
-				attr.interpreted = attr.parse_attribute(&class_file.constant_pool);
-			}
-		}
-
-		for method in &mut class_file.methods {
-			for attr in &mut method.attributes {
-				attr.interpreted = attr.parse_attribute(&class_file.constant_pool);
-			}
-		}
-
-		for attr in &mut class_file.attributes {
-			attr.interpreted = attr.parse_attribute(&class_file.constant_pool);
-		}
-
-		Ok((rest, class_file))
-	}
-	pub fn constant_pool(&self) -> Vec<Option<CpInfo>> {
+	// pub fn from_bytes_interpreted(input: (&[u8], usize)) -> Result<((&[u8], usize), Self), DekuError> {
+	// 	let (rest, mut class_file) = Self::from_bytes(input)?;
+	//
+	// 	// Interpret all attributes in-place
+	// 	for field in &mut class_file.fields {
+	// 		for attr in &mut field.attributes {
+	// 			attr.interpreted = attr.parse_attribute(&class_file.constant_pool);
+	// 		}
+	// 	}
+	//
+	// 	for method in &mut class_file.methods {
+	// 		for attr in &mut method.attributes {
+	// 			attr.interpreted = attr.parse_attribute(&class_file.constant_pool);
+	// 		}
+	// 	}
+	//
+	// 	for attr in &mut class_file.attributes {
+	// 		attr.interpreted = attr.parse_attribute(&class_file.constant_pool);
+	// 	}
+	//
+	// 	Ok((rest, class_file))
+	// }
+	pub fn constant_pool(&self) -> Vec<Option<ConstantPoolEntry>> {
 		let mut expanded = vec![None]; // Index 0 is unused in JVM
 
 		for entry in self.constant_pool.as_ref() {
 			expanded.push(Some(entry.clone()));
 			match entry {
-				CpInfo::Long(_) | CpInfo::Double(_) => {
+				ConstantPoolEntry::Long(_) | ConstantPoolEntry::Double(_) => {
 					expanded.push(None); // Phantom entry
 				}
 				_ => {}
@@ -324,32 +391,10 @@ impl ClassFile {
 		expanded
 	}
 
-	pub fn get_constant(&self, index: u16) -> Option<&CpInfo> {
-		// More efficient: calculate actual index
-		/*let mut current_index = 1u16;
-		for entry in &self.constant_pool {
-			if current_index == index {
-				return Some(entry);
-			}
-			current_index += match entry {
-				CpInfo::Long(_) | CpInfo::Double(_) => 2,
-				_ => 1,
-			};
-		}
-		None*/
-		self.constant_pool.get_constant(index)
-	}
-
-	pub fn get_string(&self, index: u16) -> Result<String, ()> {
-		self.constant_pool.get_string(index)
-		// if let Some(CpInfo::Utf8(utf)) = self.get_constant(index) {
-		//     return Some(String::from_utf8_lossy(&utf.bytes));
-		// }
-		// None
-	}
-
 	fn format_attribute(&self, f: &mut fmt::Formatter<'_>, attr: &AttributeInfo) -> fmt::Result {
-		let attribute = attr.get(self).unwrap_or_else(|| panic!("Failed to parse attribute {}", attr));
+		let attribute = attr
+			.get(self)
+			.unwrap_or_else(|| panic!("Failed to parse attribute {}", attr));
 		match &attribute {
 			Attribute::Code(code_attr) => {
 				writeln!(f, "  {}", attribute)?;
@@ -389,7 +434,7 @@ impl ClassFile {
 		}
 	}
 
-	pub fn get_code(&self, method_ref_data: MethodData) -> Result<CodeAttribute, ()> {
+	/*pub fn get_code(&self, method_ref_data: MethodRef) -> Result<CodeAttribute, ConstantPoolError> {
 		for info in self.methods.iter() {
 			let data = self.constant_pool.resolve_method_info(info)?;
 			let is_same_method_name = data.name.eq(&method_ref_data.name);
@@ -403,8 +448,8 @@ impl ClassFile {
 				}
 			}
 		}
-		Err(())
-	}
+		Err("Failed to find bytecode for method".to_string().into())
+	}*/
 
 	// pub fn get_static_field_value(&self, field_ref: &FieldData) -> Value {
 	//     for info in self.fields.iter() {
@@ -418,7 +463,10 @@ impl ClassFile {
 	// }
 }
 
-pub fn pool_get_constant(constant_pool: &[CpInfo], index: u16) -> Option<&CpInfo> {
+pub fn pool_get_constant(
+	constant_pool: &[ConstantPoolEntry],
+	index: u16,
+) -> Option<&ConstantPoolEntry> {
 	// More efficient: calculate actual index
 	let mut current_index = 1u16;
 	for entry in constant_pool {
@@ -426,15 +474,15 @@ pub fn pool_get_constant(constant_pool: &[CpInfo], index: u16) -> Option<&CpInfo
 			return Some(entry);
 		}
 		current_index += match entry {
-			CpInfo::Long(_) | CpInfo::Double(_) => 2,
+			ConstantPoolEntry::Long(_) | ConstantPoolEntry::Double(_) => 2,
 			_ => 1,
 		};
 	}
 	None
 }
 
-pub fn pool_get_string(constant_pool: &[CpInfo], index: u16) -> Option<Cow<'_, str>> {
-	if let Some(CpInfo::Utf8(utf)) = pool_get_constant(constant_pool, index) {
+pub fn pool_get_string(constant_pool: &[ConstantPoolEntry], index: u16) -> Option<Cow<'_, str>> {
+	if let Some(ConstantPoolEntry::Utf8(utf)) = pool_get_constant(constant_pool, index) {
 		return Some(String::from_utf8_lossy(&utf.bytes));
 	}
 	None
@@ -448,140 +496,163 @@ pub(crate) struct Bytecode {
 	pub code: Vec<Ops>,
 }
 
-
-
-pub trait ConstantPoolExt {
-	fn get_constant(&self, index: u16) -> Option<&CpInfo>;
-	fn get_string(&self, index: u16) -> Result<String, ()>;
-	fn get_field(&self, index: u16) -> Result<&ConstantFieldrefInfo, ()>;
-	fn get_class(&self, index: u16) -> Result<&ConstantClassInfo, ()>;
-	fn get_name_and_type(&self, index: u16) -> Result<&ConstantNameAndTypeInfo, ()>;
-	fn resolve_field(&self, index: u16) -> Result<FieldData, ()>;
-	fn resolve_method_ref(&self, index: u16) -> Result<MethodData, ()>;
-	fn resolve_method_info(&self, method: &MethodInfo) -> Result<MethodData, ()>;
-	fn resolve_field_info(&self, field: &FieldInfo) -> Result<FieldData, ()>;
-}
-
-impl ConstantPoolExt for [CpInfo] {
-	fn get_constant(&self, index: u16) -> Option<&CpInfo> {
-		let mut current_index = 1u16;
-		for entry in self {
-			if current_index == index {
-				return Some(entry);
-			}
-			current_index += match entry {
-				CpInfo::Long(_) | CpInfo::Double(_) => 2,
-				_ => 1,
-			};
-		}
-		None
-	}
-
-	fn get_string(&self, index: u16) -> Result<String, ()> {
-		let cp_entry = self.get_constant(index).ok_or(())?;
-		match cp_entry {
-			CpInfo::Utf8(data) => {
-				String::from_utf8(data.bytes.clone()).map_err(|e| ())
-			},
-			_ => Err(()),
-		}
-	}
-
-	fn get_field(&self, index: u16) -> Result<&ConstantFieldrefInfo, ()> {
-		let cp_entry = self.get_constant(index).ok_or(())?;
-		match cp_entry {
-			CpInfo::FieldRef(data) => Ok(data),
-			_ => Err(()),
-		}
-	}
-
-	fn get_class(&self, index: u16) -> Result<&ConstantClassInfo, ()> {
-		let cp_entry = self.get_constant(index).ok_or(())?;
-		match cp_entry {
-			CpInfo::Class(data) => Ok(data),
-			_ => Err(()),
-		}
-	}
-	fn get_name_and_type(&self, index: u16) -> Result<&ConstantNameAndTypeInfo, ()> {
-		let cp_entry = self.get_constant(index).ok_or(())?;
-		match cp_entry {
-			CpInfo::NameAndType(data) => Ok(data),
-			_ => Err(()),
-		}
-	}
-
-	fn resolve_field(&self, index: u16) -> Result<FieldData, ()> {
-		if let Some(CpInfo::FieldRef(fr)) = self.get_constant(index) {
-			let class = self.get_class(fr.class_index)?;
-			let class = self.get_string(class.name_index)?;
-			let name_and_type = self.get_name_and_type(fr.name_and_type_index)?;
-			let name = self.get_string(name_and_type.name_index)?;
-			let desc = self.get_string(name_and_type.descriptor_index)?;
-			let desc = FieldType::parse(&desc)?;
-			Ok(FieldData {
-				class,
-				name,
-				desc,
-			})
-		} else { Err(()) }
-	}
-
-	fn resolve_method_ref(&self, index: u16) -> Result<MethodData, ()> {
-		if let Some(CpInfo::MethodRef(mr)) = self.get_constant(index) {
-			let class = self.get_class(mr.class_index)?;
-			let class = self.get_string(class.name_index)?;
-			let name_and_type = self.get_name_and_type(mr.name_and_type_index)?;
-			let name = self.get_string(name_and_type.name_index)?;
-			let desc = self.get_string(name_and_type.descriptor_index)?;
-			let desc = MethodDescriptor::parse(&desc)?;
-			Ok(MethodData {
-				class,
-				name,
-				desc,
-			})
-		} else { Err(()) }
-	}
-
-	// (name, desc)
-	fn resolve_method_info(&self, method: &MethodInfo) -> Result<MethodData, ()> {
-		let desc = self.get_string(method.descriptor_index)?;
-		let desc = MethodDescriptor::parse(&desc)?;
-		let name = self.get_string(method.name_index)?;
-		Ok(MethodData {
-			class: "".to_string(),
-			name,
-			desc,
-		})
-	}
-
-	fn resolve_field_info(&self, field: &FieldInfo) -> Result<FieldData, ()> {
-		let desc = self.get_string(field.descriptor_index)?;
-		let desc = FieldType::parse(&desc)?;
-		let name = self.get_string(field.name_index)?;
-		Ok(FieldData {
-			class: "".to_string(),
-			name,
-			desc,
-		})
-	}
-}
-
+// pub trait ConstantPoolExt {
+// 	fn get_constant(&self, index: u16) -> Result<&ConstantPoolEntry, ()>;
+// 	fn get_string(&self, index: u16) -> Result<String, ()>;
+// 	fn get_field(&self, index: u16) -> Result<&ConstantFieldrefInfo, ()>;
+// 	fn get_class(&self, index: u16) -> Result<&ConstantClassInfo, ()>;
+// 	fn get_name_and_type(&self, index: u16) -> Result<&ConstantNameAndTypeInfo, ()>;
+// 	fn resolve_field(&self, index: u16) -> Result<FieldData, ()>;
+// 	fn resolve_method_ref(&self, index: u16) -> Result<MethodData, ()>;
+// 	fn resolve_method_info(&self, method: &MethodInfo) -> Result<MethodData, ()>;
+// 	fn resolve_field_info(&self, field: &FieldInfo) -> Result<FieldData, ()>;
+// }
+//
+// impl ConstantPoolExt for [ConstantPoolEntry] {
+// 	fn get_constant(&self, index: u16) -> Result<&ConstantPoolEntry, ()> {
+// 		let mut current_index = 1u16;
+// 		for entry in self {
+// 			if current_index == index {
+// 				return Ok(entry);
+// 			}
+// 			current_index += match entry {
+// 				ConstantPoolEntry::Long(_) | ConstantPoolEntry::Double(_) => 2,
+// 				_ => 1,
+// 			};
+// 		}
+// 		Err(())
+// 	}
+//
+// 	fn get_string(&self, index: u16) -> Result<String, ()> {
+// 		let cp_entry = self.get_constant(index)?;
+// 		match cp_entry {
+// 			ConstantPoolEntry::Utf8(data) => {
+// 				String::from_utf8(data.bytes.clone()).map_err(|e| ())
+// 			},
+// 			_ => Err(()),
+// 		}
+// 	}
+//
+// 	fn get_field(&self, index: u16) -> Result<&ConstantFieldrefInfo, ()> {
+// 		let cp_entry = self.get_constant(index)?;
+// 		match cp_entry {
+// 			ConstantPoolEntry::FieldRef(data) => Ok(data),
+// 			_ => Err(()),
+// 		}
+// 	}
+//
+// 	fn get_class(&self, index: u16) -> Result<&ConstantClassInfo, ()> {
+// 		let cp_entry = self.get_constant(index)?;
+// 		match cp_entry {
+// 			ConstantPoolEntry::Class(data) => Ok(data),
+// 			_ => Err(()),
+// 		}
+// 	}
+// 	fn get_name_and_type(&self, index: u16) -> Result<&ConstantNameAndTypeInfo, ()> {
+// 		let cp_entry = self.get_constant(index)?;
+// 		match cp_entry {
+// 			ConstantPoolEntry::NameAndType(data) => Ok(data),
+// 			_ => Err(()),
+// 		}
+// 	}
+//
+// 	fn resolve_field(&self, index: u16) -> Result<FieldData, ()> {
+// 		let fr = self.get_field(index)?;
+// 		let class = self.get_class(fr.class_index)?;
+// 		let class = self.get_string(class.name_index)?;
+// 		let name_and_type = self.get_name_and_type(fr.name_and_type_index)?;
+// 		let name = self.get_string(name_and_type.name_index)?;
+// 		let desc = self.get_string(name_and_type.descriptor_index)?;
+// 		let desc = FieldType::parse(&desc)?;
+// 		Ok(FieldData {
+// 			class,
+// 			name,
+// 			desc,
+// 		})
+// 	}
+//
+// 	fn resolve_method_ref(&self, index: u16) -> Result<MethodData, ()> {
+// 		if let ConstantPoolEntry::MethodRef(mr) = self.get_constant(index)? {
+// 			let class = self.get_class(mr.class_index)?;
+// 			let class = self.get_string(class.name_index)?;
+// 			let name_and_type = self.get_name_and_type(mr.name_and_type_index)?;
+// 			let name = self.get_string(name_and_type.name_index)?;
+// 			let desc = self.get_string(name_and_type.descriptor_index)?;
+// 			let desc = MethodDescriptor::parse(&desc)?;
+// 			Ok(MethodData {
+// 				class,
+// 				name,
+// 				desc,
+// 				code: None,
+// 			})
+// 		} else { Err(()) }
+// 	}
+//
+// 	// (name, desc)
+// 	fn resolve_method_info(&self, method: &MethodInfo) -> Result<MethodData, ()> {
+// 		let desc = self.get_string(method.descriptor_index)?;
+// 		let desc = MethodDescriptor::parse(&desc)?;
+// 		let name = self.get_string(method.name_index)?;
+// 		Ok(MethodData {
+// 			class: "".to_string(),
+// 			name,
+// 			desc,
+// 			code: None,
+// 		})
+// 	}
+//
+// 	fn resolve_field_info(&self, field: &FieldInfo) -> Result<FieldData, ()> {
+// 		let desc = self.get_string(field.descriptor_index)?;
+// 		let desc = FieldType::parse(&desc)?;
+// 		let name = self.get_string(field.name_index)?;
+// 		Ok(FieldData {
+// 			class: "".to_string(),
+// 			name,
+// 			desc,
+// 		})
+// 	}
+// }
 
 #[derive(Debug)]
-pub struct MethodData {
+pub struct MethodRef {
 	pub class: String,
 	pub name: String,
 	pub desc: MethodDescriptor,
-	pub code: Option<Bytecode>
+}
+#[derive(Debug, Clone)]
+pub struct MethodData {
+	pub name: String,
+	pub desc: MethodDescriptor,
+	pub code: Option<CodeAttribute>,
+	pub flags: MethodFlags,
+	// pub exceptions: Option<_>,
+	// pub visible_annotations: Option<_>,
+	// pub invisible_annotations: Option<_>,
+	// pub default_annotation: Option<_>,
+	// pub method_parameters: Option<_>
 }
 
-
-
 #[derive(Debug)]
-pub struct FieldData {
+pub struct FieldRef {
 	pub class: String,
 	pub name: String,
-	pub desc: FieldType
+	pub desc: FieldType,
+}
+
+pub struct FieldData {
+	pub name: String,
+	pub flags: FieldFlags,
+	pub desc: FieldType,
+	pub value: Option<Constant>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Constant {
+	Int(i32),
+	Long(i64),
+	Float(f32),
+	Double(f64),
+	String(String),
 }
 
 #[allow(non_snake_case)]
@@ -589,23 +660,23 @@ pub struct FieldData {
 pub struct ClassFlags {
 	// flags
 	#[deku(bits = 1)]
-	MODULE: bool,
+	pub MODULE: bool,
 	#[deku(bits = 1)]
-	ENUM: bool,
+	pub ENUM: bool,
 	#[deku(bits = 1)]
-	ANNOTATION: bool,
+	pub ANNOTATION: bool,
 	#[deku(bits = 1)]
-	SYNTHETIC: bool,
+	pub SYNTHETIC: bool,
 	#[deku(bits = 1, pad_bits_before = "1")]
-	ABSTRACT: bool,
+	pub ABSTRACT: bool,
 	#[deku(bits = 1)]
-	INTERFACE: bool,
+	pub INTERFACE: bool,
 	#[deku(bits = 1, pad_bits_before = "3")]
-	SUPER: bool,
+	pub SUPER: bool,
 	#[deku(bits = 1)]
-	FINAL: bool,
+	pub FINAL: bool,
 	#[deku(bits = 1, pad_bits_before = "3")]
-	PUBLIC: bool,
+	pub PUBLIC: bool,
 }
 
 impl From<u16> for ClassFlags {
@@ -614,8 +685,6 @@ impl From<u16> for ClassFlags {
 		flags
 	}
 }
-
-
 
 #[allow(non_snake_case)]
 #[derive(Debug, PartialEq, DekuRead, DekuWrite)]
@@ -668,32 +737,32 @@ impl From<u16> for FieldFlags {
 }
 
 #[allow(non_snake_case)]
-#[derive(Debug, PartialEq, DekuRead, DekuWrite)]
+#[derive(Debug, PartialEq, DekuRead, DekuWrite, Clone)]
 pub struct MethodFlags {
 	#[deku(bits = 1, pad_bits_before = "3")]
-	ACC_SYNTHETIC: bool,
+	pub ACC_SYNTHETIC: bool,
 	#[deku(bits = 1)]
-	ACC_STRICT: bool,
+	pub ACC_STRICT: bool,
 	#[deku(bits = 1)]
-	ACC_ABSTRACT: bool,
+	pub ACC_ABSTRACT: bool,
 	#[deku(bits = 1, pad_bits_before = "1")]
-	ACC_NATIVE: bool,
+	pub ACC_NATIVE: bool,
 	#[deku(bits = 1)]
-	ACC_VARARGS: bool,
+	pub ACC_VARARGS: bool,
 	#[deku(bits = 1)]
-	ACC_BRIDGE: bool,
+	pub ACC_BRIDGE: bool,
 	#[deku(bits = 1)]
-	ACC_SYNCHRONIZED: bool,
+	pub ACC_SYNCHRONIZED: bool,
 	#[deku(bits = 1)]
-	ACC_FINAL: bool,
+	pub ACC_FINAL: bool,
 	#[deku(bits = 1)]
-	ACC_STATIC: bool,
+	pub ACC_STATIC: bool,
 	#[deku(bits = 1)]
-	ACC_PROTECTED: bool,
+	pub ACC_PROTECTED: bool,
 	#[deku(bits = 1)]
-	ACC_PRIVATE: bool,
+	pub ACC_PRIVATE: bool,
 	#[deku(bits = 1)]
-	ACC_PUBLIC: bool,
+	pub ACC_PUBLIC: bool,
 }
 
 impl From<u16> for MethodFlags {
@@ -703,12 +772,11 @@ impl From<u16> for MethodFlags {
 	}
 }
 
-
 //yoinked because im monkled
 impl MethodDescriptor {
 	/// Parses a method descriptor as specified in the JVM specs:
 	/// https://docs.oracle.com/javase/specs/jvms/se7/html/jvms-4.html#jvms-4.3.3
-	pub fn parse(descriptor: &str) -> Result<MethodDescriptor, ()> {
+	pub fn parse(descriptor: &str) -> Result<MethodDescriptor, DescParseError> {
 		let mut chars = descriptor.chars();
 		match chars.next() {
 			Some('(') => {
@@ -720,17 +788,17 @@ impl MethodDescriptor {
 						return_type,
 					})
 				} else {
-					Err(())
+					Err(DescParseError)
 				}
 			}
-			_ => Err(()),
+			_ => Err(DescParseError),
 		}
 	}
 
 	fn parse_parameters(
 		descriptor: &str,
 		chars: &mut Chars,
-	) -> Result<Vec<FieldType>, ()> {
+	) -> Result<Vec<FieldType>, DescParseError> {
 		let mut parameters = Vec::new();
 		loop {
 			match chars.clone().next() {
@@ -739,7 +807,7 @@ impl MethodDescriptor {
 					let param = FieldType::parse_from(descriptor, chars)?;
 					parameters.push(param);
 				}
-				None => return Err(()),
+				None => return Err(DescParseError),
 			}
 		}
 	}
@@ -747,7 +815,7 @@ impl MethodDescriptor {
 	fn parse_return_type(
 		descriptor: &str,
 		chars: &mut Chars,
-	) -> Result<Option<FieldType>, ()> {
+	) -> Result<Option<FieldType>, DescParseError> {
 		match chars.clone().next() {
 			Some('V') => Ok(None),
 			Some(_) => {
@@ -755,10 +823,10 @@ impl MethodDescriptor {
 				if chars.next().is_none() {
 					Ok(return_type)
 				} else {
-					Err(())
+					Err(DescParseError)
 				}
 			}
-			_ => Err(()),
+			_ => Err(DescParseError),
 		}
 	}
 
@@ -766,24 +834,30 @@ impl MethodDescriptor {
 		self.parameters.len()
 	}
 }
+#[derive(Debug)]
+pub struct DescParseError;
+
+impl Display for DescParseError {
+	fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+		write!(f, "Failed to parse field descriptor")
+	}
+}
 
 impl FieldType {
-	pub fn parse(type_descriptor: &str) -> Result<FieldType, ()> {
+	pub fn parse(type_descriptor: &str) -> Result<FieldType, DescParseError> {
 		let mut chars = type_descriptor.chars();
 		let descriptor = Self::parse_from(type_descriptor, &mut chars)?;
 		match chars.next() {
 			None => Ok(descriptor),
-			Some(_) => Err(()),
+			Some(_) => Err(DescParseError),
 		}
 	}
 
 	pub(crate) fn parse_from(
 		type_descriptor: &str,
 		chars: &mut Chars,
-	) -> Result<FieldType, ()> {
-		let first_char = chars
-			.next()
-			.ok_or(())?;
+	) -> Result<FieldType, DescParseError> {
+		let first_char = chars.next().ok_or(DescParseError)?;
 
 		Ok(match first_char {
 			'B' => FieldType::Base(BaseType::Byte),
@@ -798,14 +872,14 @@ impl FieldType {
 				let class_name: String = chars.take_while_ref(|c| *c != ';').collect();
 				match chars.next() {
 					Some(';') => FieldType::ClassType(class_name),
-					_ => return Err(()),
+					_ => return Err(DescParseError),
 				}
 			}
 			'[' => {
 				let component_type = Self::parse_from(type_descriptor, chars)?;
 				FieldType::ArrayType(Box::new(component_type))
 			}
-			_ => return Err(()),
+			_ => return Err(DescParseError),
 		})
 	}
 }

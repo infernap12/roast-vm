@@ -1,38 +1,75 @@
-use std::sync::Arc;
 use crate::attributes::AttributeInfo;
-use crate::class_file::{ClassFlags, CpInfo, FieldData, FieldInfo, MethodInfo, MethodData, ClassFile};
+use crate::class_file::{
+	ClassFile, ClassFlags, ConstantPoolEntry, FieldData, FieldInfo, FieldRef, MethodData,
+	MethodInfo, MethodRef,
+};
+use crate::{FieldType, MethodDescriptor, VmError};
+use std::sync::{Arc, Mutex};
+use std::thread::ThreadId;
+
+/// JVM Spec 5.5: Initialization states for a class
+#[derive(Debug, Clone, PartialEq)]
+pub enum InitState {
+	/// Verified and prepared but not initialized
+	NotInitialized,
+	/// Being initialized by a specific thread
+	Initializing(ThreadId),
+	/// Fully initialized and ready for use
+	Initialized,
+	/// Initialization failed
+	Error(String),
+}
 
 pub struct RuntimeClass {
-	pub constant_pool: Arc<Vec<CpInfo>>,
+	pub constant_pool: Arc<Vec<ConstantPoolEntry>>,
 	pub access_flags: ClassFlags,
 	pub this_class: String,
-	pub super_class: Arc<RuntimeClass>,
+	pub super_class: Option<Arc<RuntimeClass>>,
 	pub interfaces: Vec<Arc<RuntimeClass>>,
 	pub fields: Vec<FieldData>,
 	pub methods: Vec<MethodData>,
+	/// Thread-safe initialization state (JVM Spec 5.5)
+	pub init_state: Mutex<InitState>,
 }
 
-impl From<ClassFile> for RuntimeClass {
-	fn from(value: ClassFile) -> Self {
-		let constant_pool = value.constant_pool.clone();
-		let access_flags = ClassFlags::from(value.access_flags);
+impl RuntimeClass {
+	pub fn find_method(&self, name: &str, desc: MethodDescriptor) -> Result<&MethodData, VmError> {
+		println!("Finding method");
+		if let Some(method) = self.methods.iter().find(|e| {
+			println!("Method Name Needed: {name}, Checked:{}", e.name);
+			println!("Method type Needed: {desc:?}, Checked:{:?}", e.desc);
+			let name_match = e.name.eq(name);
+			let param_match = desc.parameters == e.desc.parameters;
+			name_match && param_match
+		}) {
+			return Ok(method);
+		};
 
-
-
-
-
-
-
-
-
-		Self {
-			constant_pool,
-			access_flags,
-			this_class: "".to_string(),
-			super_class: Arc::new(RuntimeClass {}),
-			interfaces: vec![],
-			fields: vec![],
-			methods: vec![],
+		// recurse super class
+		if let Some(super_class) = &self.super_class {
+			return super_class.find_method(name, desc);
 		}
+		// No method found, and we must be Object, as we don't have a superclass
+		Err(VmError::LoaderError("Failed to find method".to_string()))
+	}
+
+	pub fn find_field(&self, name: &str, desc: FieldType) -> Result<&FieldData, VmError> {
+		println!("Finding field");
+		if let Some(field) = self.fields.iter().find(|e| {
+			println!("Field Name Needed: {name}, Checked:{}", e.name);
+			println!("Field type Needed: {desc:?}, Checked:{:?}", e.desc);
+			let name_match = e.name.eq(name);
+			let type_match = desc == e.desc;
+			name_match && type_match
+		}) {
+			return Ok(field);
+		};
+
+		// recurse super class
+		if let Some(super_class) = &self.super_class {
+			return super_class.find_field(name, desc);
+		}
+		// No field found, and we must be Object, as we don't have a superclass
+		Err(VmError::LoaderError("Failed to find field".to_string()))
 	}
 }

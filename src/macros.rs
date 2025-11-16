@@ -1,3 +1,4 @@
+use crate::class_file::constant_pool::ConstantPoolError;
 use crate::Value;
 
 #[macro_export]
@@ -39,4 +40,17 @@ macro_rules! load {
     ($self:expr, d, $index:expr) => {load!($self, l, $index)};
     ($self:expr, l, $index:expr) => {load!($self, i, $index)};
     ($self:expr, f, $index:expr) => {load!($self, i, $index)};
+}
+
+#[macro_export]
+macro_rules! pool_get_impl {
+    ($fn_name:ident => $result:ty, $variant:ident) => {
+        fn $fn_name(&self, index: u16) -> Result<&$result, ConstantPoolError> {
+            let cp_entry = self.get_constant(index)?;
+            match cp_entry {
+                ConstantPoolEntry::$variant(value) => Ok(value),
+                _ => Err(ConstantPoolError(format!("Expected {} constant at index {}", stringify!($variant), index))),
+            }
+        }
+    };
 }

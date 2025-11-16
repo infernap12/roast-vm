@@ -4,11 +4,14 @@ use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use deku::DekuContainerRead;
 use log::warn;
+use crate::attributes::Attribute;
 use crate::bimage::Bimage;
 use crate::class::RuntimeClass;
-use crate::class_file::{ClassFile, ClassFlags, ConstantClassInfo, ConstantPoolExt, CpInfo};
-
+use crate::class_file::{ClassFile, ClassFlags, ConstantClassInfo, ConstantPoolEntry, FieldData, FieldFlags, MethodData, MethodFlags};
+use crate::class_file::constant_pool::{ConstantPoolExt, ConstantPoolGet};
+use crate::{FieldType, MethodDescriptor};
 
 pub type LoaderRef = Arc<Mutex<ClassLoader>>;
 
@@ -74,8 +77,9 @@ pub fn resolve_path(what: &str) -> Result<(PathBuf, String), String> {
 /// ```
 #[derive(Default)]
 pub struct ClassLoader {
-	classes: HashMap<String, Arc<ClassFile>>,
+	classes: HashMap<String, Arc<RuntimeClass>>,
 	bimage: Bimage,
+	pub needs_init: Vec<Arc<RuntimeClass>>
 }
 
 impl ClassLoader {
@@ -119,12 +123,12 @@ impl ClassLoader {
 	///     }
 	/// }
 	/// ```
-	pub fn get_or_load(&mut self, what: &str) -> Result<Arc<ClassFile>, String> {
+	pub fn get_or_load(&mut self, what: &str) -> Result<Arc<RuntimeClass>, String> {
 		if let Some(class) = self.classes.get(what) {
 			return Ok(class.clone());
 		}
 		let class = self.load_class(what)?;
-		self.classes.insert(what.to_string(), class.clone());
+		self.needs_init.push(class.clone());
 		Ok(class)
 	}
 
@@ -132,49 +136,121 @@ impl ClassLoader {
 		 self.classes.clone()
 	 }*/
 
-	fn load_class(&mut self, what: &str) -> Result<Arc<ClassFile>, String> {
-		let (module, class_fqn) = what.split_once("/").unwrap_or(("", what));
-		let bytes = self.bimage.get_class(module, class_fqn);
-		let (_, cf) = ClassFile::from_bytes_interpreted((bytes.as_ref(), 0))
+	fn load_class(&mut self, what: &str) -> Result<Arc<RuntimeClass>, String> {
+		let (module, class_fqn) = ("", what);
+		let bytes = self.bimage.get_class(module, class_fqn).unwrap_or_else(|| {
+			let path = format!("./data/{what}.class");
+			println!("{}", path);
+			let mut class_file = File::open(path).unwrap();
+			let mut bytes = Vec::new();
+			class_file.read_to_end(&mut bytes).unwrap();
+			bytes
+		});
+		let (_, cf) = ClassFile::from_bytes((bytes.as_ref(), 0))
 			.map_err(|e| format!("failed to parse class file: {}", e))?;
-		let arced = Arc::new(cf);
+		let runtime = self.runtime_class(cf);
+		let arced = Arc::new(runtime);
 		let option = self.classes.insert(class_fqn.to_string(), arced.clone());
 		if option.is_some() { warn!("Replaced loaded class: {}", class_fqn) }
 		Ok(arced)
 	}
 
 
-
-
-
-	fn runtime_class(&self, class_file: ClassFile) -> RuntimeClass {
+	fn runtime_class(&mut self, class_file: ClassFile) -> RuntimeClass {
 		let constant_pool = class_file.constant_pool.clone();
 		let access_flags = ClassFlags::from(class_file.access_flags);
 		let this_class = {
-			let this_class_info = class_file.constant_pool.get_constant(class_file.this_class)
-			if let Some(CpInfo::Class(class_info)) = this_class_info {
-				class_file.constant_pool.get_string(class_info.name_index)
+			let cl = class_file.constant_pool.get_class_info(class_file.this_class).unwrap();
+			let name = class_file.constant_pool.get_string(cl.name_index).unwrap();
+			name
+		};
+		let super_class = {
+			if (this_class.eq("java/lang/Object"))
+			{
+				debug_assert_eq!(this_class, "java/lang/Object");
+				debug_assert_eq!(class_file.super_class, 0u16);
+				None
+			} else {
+				debug_assert_ne!(class_file.super_class, 0u16);
+				let super_info = constant_pool.get_class_info(class_file.super_class).unwrap();
+				let name = constant_pool.get_string(**super_info).unwrap();
+				Some(self.get_or_load(&*name).unwrap())
 			}
+		};
 
+		if let Some(super_cl) = super_class.clone() {
+			let super_is_object = super_cl.super_class.is_none();
 
-
+			if access_flags.INTERFACE {
+				debug_assert!(super_is_object);
+			}
 		}
 
+		let interfaces = class_file
+			.interfaces.iter().copied()
+			.map(|e| {
+				let interface_info = constant_pool.get_class_info(e).unwrap();
+				let name = constant_pool.get_string(interface_info.name_index).unwrap();
+				self.get_or_load(&name).unwrap()
+			}).collect::<Vec<_>>();
+
+		let fields = class_file
+			.fields.iter()
+			.map(|e| {
+				let name = constant_pool.get_string(e.name_index).unwrap();
+				let flags = FieldFlags::from(e.access_flags);
+				let desc = constant_pool.get_string(e.descriptor_index).map(|e|{
+					FieldType::parse(&e)
+				}).unwrap().unwrap();
+				let value = e.attributes.first()
+					.and_then(|x| {
+						if let Attribute::ConstantValue(val) = constant_pool.parse_attribute(x.clone()).unwrap() {
+							Some(val)
+						} else {
+							None
+						}
+					});
+				FieldData {
+					name,
+					flags,
+					desc,
+					value,
+				}
+			}).collect::<Vec<_>>();
 
 
-
-
-
+		let methods = class_file.methods.iter().map(|e| {
+			let name = constant_pool.get_string(e.name_index).unwrap();
+			let flags = MethodFlags::from(e.access_flags);
+			let desc = constant_pool.get_string(e.descriptor_index).map(|e|{
+				MethodDescriptor::parse(&e)
+			}).unwrap().unwrap();
+			let code = e.attributes.first()
+				.and_then(|x| {
+					if let Attribute::Code(val) = constant_pool.parse_attribute(x.clone()).unwrap() {
+						Some(val)
+					} else {
+						None
+					}
+				});
+			MethodData {
+				name,
+				flags,
+				desc,
+				code,
+			}
+		}).collect::<Vec<_>>();
 
 
 		RuntimeClass {
 			constant_pool,
 			access_flags,
-			this_class: "".to_string(),
-			super_class: Arc::new(RuntimeClass {}),
-			interfaces: vec![],
-			fields: vec![],
-			methods: vec![],
+			this_class,
+			super_class,
+			interfaces,
+			fields,
+			methods,
+			init_state: Mutex::new(crate::class::InitState::NotInitialized),
 		}
 	}
 }
