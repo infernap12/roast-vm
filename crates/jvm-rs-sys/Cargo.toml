@@ -1,0 +1,12 @@
+[package]
+name = "jvm-rs-sys"
+version = "0.1.0"
+edition = "2024"
+publish = ["nexus"]
+
+[dependencies]
+jni = { workspace = true }
+
+[lib]
+name = "jvm_rs"
+crate-type = ["cdylib"]

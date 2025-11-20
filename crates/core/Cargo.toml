@@ -1,0 +1,23 @@
+[package]
+name = "jvm-rs-core"
+version = "0.1.0"
+edition = "2024"
+publish = ["nexus"]
+
+[dependencies]
+deku = { workspace = true }
+deku_derive = { workspace = true }
+log = { workspace = true }
+env_logger = { workspace = true }
+itertools = { workspace = true }
+sevenz-rust2 = { workspace = true }
+dashmap = { workspace = true }
+libloading = { workspace = true }
+libffi = { workspace = true }
+jni = { workspace = true }
+
+[build-dependencies]
+bindgen = "0.72.1"
+
+[lints.rust]
+#missing_docs = "warn"

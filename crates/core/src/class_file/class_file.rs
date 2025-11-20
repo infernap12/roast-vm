@@ -10,7 +10,7 @@ use std::fmt;
 use std::fmt::{Display, Formatter};
 use std::ops::Deref;
 use std::str::Chars;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 #[derive(Debug, PartialEq, DekuRead)]
 #[deku(magic = b"\xCA\xFE\xBA\xBE", endian = "big")]
@@ -639,11 +639,12 @@ pub struct FieldRef {
 	pub desc: FieldType,
 }
 
+#[derive(Debug)]
 pub struct FieldData {
 	pub name: String,
 	pub flags: FieldFlags,
 	pub desc: FieldType,
-	pub value: Option<Constant>,
+	pub value: Arc<Mutex<Option<Value>>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -653,6 +654,20 @@ pub enum Constant {
 	Float(f32),
 	Double(f64),
 	String(String),
+}
+
+impl From<Constant> for Value {
+	fn from(value: Constant) -> Self {
+		match value {
+			Constant::Int(x) => Value::Int(x),
+			Constant::Long(x) => Value::Long(x),
+			Constant::Float(x) => Value::Float(x),
+			Constant::Double(x) => Value::Double(x),
+			Constant::String(x) => {
+				todo!("Constant string")
+			}
+		}
+	}
 }
 
 #[allow(non_snake_case)]

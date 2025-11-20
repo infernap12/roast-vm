@@ -1,10 +1,19 @@
 use crate::class::RuntimeClass;
-use crate::class_file::{ClassFile, MethodRef};
+use crate::class_file::{ClassFile, MethodData, MethodRef};
 use crate::class_loader::{ClassLoader, LoaderRef};
+use crate::jni::create_jni_function_table;
 use crate::vm::Vm;
-use crate::{Frame, MethodDescriptor, Value, VmError};
+use crate::{BaseType, FieldType, Frame, MethodDescriptor, Value, VmError};
 use deku::DekuError::Incomplete;
+use jni::sys::jlong;
+use jni::JNIEnv;
+use libffi::low::call;
+use libffi::middle::*;
+use log::{trace, warn};
+use std::ops::Add;
+use std::ptr::null_mut;
 use std::sync::{Arc, Mutex};
+use std::vec::IntoIter;
 
 type MethodCallResult = Result<Option<Value>, VmError>;
 
@@ -38,9 +47,9 @@ impl VmThread {
 			.lock()
 			.unwrap()
 			.get_or_load(what)
-			.map_err(|e| VmError::LoaderError(e))?;
+			.map_err(VmError::LoaderError)?;
 
-		// Phase 2: Collect classes that need initialization (short lock)
+		// Phase 2: Collect classes that need initialisation (short lock)
 		let classes_to_init = {
 			let mut loader = self.loader.lock().unwrap();
 			let classes = loader.needs_init.clone();
@@ -48,7 +57,7 @@ impl VmThread {
 			classes
 		};
 
-		// Phase 3: Initialize each class (NO lock held - allows recursion)
+		// Phase 3: Initialise each class (NO lock held - allows recursion)
 		for class in classes_to_init {
 			self.init(class, thread.clone())?;
 		}
@@ -74,7 +83,7 @@ impl VmThread {
 				}
 				InitState::Initializing(tid) if *tid == current_thread => {
 					// JVM Spec 5.5: Recursive initialization by same thread is allowed
-					println!(
+					warn!(
 						"Class {} already being initialized by this thread (recursive)",
 						class.this_class
 					);
@@ -102,7 +111,7 @@ impl VmThread {
 		}
 
 		// Perform actual initialization
-		println!("Initializing class: {}", class.this_class);
+		trace!("Initializing class: {}", class.this_class);
 		let result = (|| {
 			// Initialize superclass first (if any)
 			if let Some(ref super_class) = class.super_class {
@@ -110,7 +119,7 @@ impl VmThread {
 			}
 
 			// Run <clinit> if present
-			let class_init_method = class.find_method("<clinit>", MethodDescriptor::void());
+			let class_init_method = class.find_method("<clinit>", &MethodDescriptor::void());
 			if let Ok(method) = class_init_method {
 				Frame::new(
 					method.code.clone().unwrap(),
@@ -130,7 +139,7 @@ impl VmThread {
 			match result {
 				Ok(_) => {
 					*state = InitState::Initialized;
-					println!("Class {} initialized successfully", class.this_class);
+					trace!("Class {} initialized successfully", class.this_class);
 				}
 				Err(ref e) => {
 					*state = InitState::Error(format!("{:?}", e));
@@ -142,9 +151,18 @@ impl VmThread {
 	}
 
 	pub fn invoke_main(&self, what: &str, thread: Arc<VmThread>) {
+		let method_ref = MethodRef {
+			class: what.to_string(),
+			name: "main".to_string(),
+			desc: MethodDescriptor::psvm(),
+		};
+
+		self.invoke(method_ref, thread).expect("Main method died");
+		return ();
+
 		let class = self.get_or_resolve_class(what, thread.clone()).unwrap();
 		println!("invoking main: {}", class.this_class);
-		let main_method = class.find_method("main", MethodDescriptor::psvm());
+		let main_method = class.find_method("main", &MethodDescriptor::psvm());
 		println!("{:?}", main_method);
 		if let Ok(meth) = main_method {
 			let mut frame = Frame::new(
@@ -162,10 +180,13 @@ impl VmThread {
 	pub fn invoke(&self, method_reference: MethodRef, thread: Arc<VmThread>) -> MethodCallResult {
 		let class = self.get_or_resolve_class(&method_reference.class, thread.clone())?;
 		let resolved_method = class
-			.find_method(&method_reference.name, method_reference.desc)
+			.find_method(&method_reference.name, &method_reference.desc)
 			.unwrap();
+		println!("invoking {}: {}", method_reference.name, class.this_class);
 		if resolved_method.flags.ACC_NATIVE {
-			return self.invoke_native();
+			unsafe {
+				return self.invoke_native(&method_reference);
+			}
 		}
 		let mut frame = Frame::new(
 			resolved_method.code.clone().unwrap(),
@@ -176,7 +197,79 @@ impl VmThread {
 		frame.execute()
 	}
 
-	pub fn invoke_native(&self) -> MethodCallResult {
-		todo!("Invoke native")
+	pub fn invoke_native(&self, method: &MethodRef) -> MethodCallResult {
+		let symbol_name = generate_jni_method_name(method);
+		println!("{:?}", &symbol_name);
+
+		unsafe {
+			// manually load relevant library for poc
+			let lib = libloading::os::windows::Library::new(
+				"C:\\Program Files\\Java\\jdk-25\\bin\\jvm_rs.dll",
+			)
+			.expect("load jvm_rs.dll");
+
+			// build pointer to native fn
+			let cp = CodePtr::from_ptr(
+				lib.get::<*const ()>(symbol_name.as_ref())
+					.unwrap()
+					.as_raw_ptr(),
+			);
+			// build actual JNI interface that forms the table of
+			// native functions that can be used to manipulate the JVM
+			let JNIEnv = create_jni_function_table();
+
+			// coerce my method descriptors into libffi C equivalents, then call
+			let l = method
+				.build_cif()
+				.call::<jlong>(cp, &*vec![arg(&JNIEnv), arg(&null_mut::<()>())]);
+
+			println!("{l}");
+		}
+
+		Ok(None)
+		// todo!("Invoke native")
+	}
+}
+
+pub fn generate_jni_method_name(method_ref: &MethodRef) -> String {
+	let class_name = &method_ref.class.replace("/", "_");
+	let method_name = &method_ref.name;
+	format!("Java_{class_name}_{method_name}")
+}
+
+impl From<FieldType> for Type {
+	fn from(value: FieldType) -> Self {
+		match value {
+			FieldType::Base(v) => match v {
+				BaseType::Byte => Type::i8(),
+				BaseType::Char => Type::u16(),
+				BaseType::Double => Type::f64(),
+				BaseType::Float => Type::f32(),
+				BaseType::Int => Type::i32(),
+				BaseType::Long => Type::i64(),
+				BaseType::Short => Type::i16(),
+				BaseType::Boolean => Type::i8(),
+			},
+			FieldType::ClassType(_) => Self::pointer(),
+			FieldType::ArrayType(_) => Self::pointer(),
+		}
+	}
+}
+
+impl MethodRef {
+	fn build_cif(&self) -> Cif {
+		let mut args = vec![
+			Type::pointer(), //JNIEnv*
+			Type::pointer(), //jclass
+		];
+		for v in self.desc.parameters.clone() {
+			args.push(v.into())
+		}
+		let return_type = if let Some(x) = self.desc.return_type.clone() {
+			x.into()
+		} else {
+			Type::void()
+		};
+		Builder::new().args(args).res(return_type).into_cif()
 	}
 }

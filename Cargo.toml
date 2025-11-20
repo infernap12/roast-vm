@@ -1,18 +1,17 @@
-[package]
-name = "jvm-rs"
-version = "0.1.0"
-edition = "2024"
+[workspace]
+members = [
+    "crates/*"
+]
+resolver = "3"
 
-[dependencies]
+[workspace.dependencies]
 deku = { version = "0.20.0", features = ["logging"] }
 deku_derive = "0.20.0"
 log = "0.4.28"
 env_logger = "0.11.8"
 itertools = "0.14.0"
 sevenz-rust2 = { version = "0.19.3", features = ["brotli", "zstd"] }
-
-[build-dependencies]
-bindgen = "0.72.1"
-
-[lints.rust]
-missing_docs = "warn"
+dashmap = "7.0.0-rc2"
+libloading = "0.8.9"
+libffi = "5.0.0"
+jni = "0.21.1"

@@ -1,12 +1,20 @@
+use crate::attributes::{
+	Attribute, AttributeInfo, CodeAttribute, LineNumberTableAttribute, LocalVariableTableAttribute,
+};
+use crate::class_file::{
+	ConstantClassInfo, ConstantDynamicInfo, ConstantFieldrefInfo, ConstantInterfaceMethodrefInfo,
+	ConstantInvokeDynamicInfo, ConstantMethodHandleInfo, ConstantMethodTypeInfo,
+	ConstantMethodrefInfo, ConstantModuleInfo, ConstantNameAndTypeInfo, ConstantPackageInfo,
+	ConstantPoolEntry, ConstantStringInfo, ConstantUtf8Info, DescParseError, FieldInfo, FieldRef,
+	MethodInfo, MethodRef,
+};
+use crate::{pool_get_impl, FieldType, MethodDescriptor, VmError};
+use deku::DekuContainerRead;
+use log::trace;
 use std::fmt::{Display, Formatter};
 use std::ops::Deref;
 use std::str::FromStr;
 use std::sync::Arc;
-use deku::DekuContainerRead;
-use log::trace;
-use crate::class_file::{ConstantClassInfo, ConstantFieldrefInfo, ConstantNameAndTypeInfo, ConstantPoolEntry, FieldRef, FieldInfo, MethodRef, MethodInfo, ConstantUtf8Info, ConstantStringInfo, ConstantMethodrefInfo, ConstantInterfaceMethodrefInfo, ConstantMethodHandleInfo, ConstantMethodTypeInfo, ConstantDynamicInfo, ConstantInvokeDynamicInfo, ConstantModuleInfo, ConstantPackageInfo, DescParseError};
-use crate::{pool_get_impl, FieldType, MethodDescriptor, VmError};
-use crate::attributes::{Attribute, AttributeInfo, CodeAttribute, LineNumberTableAttribute, LocalVariableTableAttribute};
 
 pub type ConstantPoolSlice = [ConstantPoolEntry];
 pub type ConstantPoolOwned = Vec<ConstantPoolEntry>;
@@ -31,7 +39,7 @@ pub trait ConstantPoolExt: ConstantPoolGet {
 	fn get_string(&self, index: u16) -> Result<String, ConstantPoolError> {
 		let cp_entry = self.get_utf8_info(index)?;
 
-		String::from_utf8(cp_entry.bytes.clone()).map_err(|e| { e.to_string().into() })
+		String::from_utf8(cp_entry.bytes.clone()).map_err(|e| e.to_string().into())
 	}
 	//
 	// fn get_field(&self, index: u16) -> Result<&ConstantFieldrefInfo, ()> {
@@ -65,11 +73,7 @@ pub trait ConstantPoolExt: ConstantPoolGet {
 		let name = self.get_string(name_and_type.name_index)?;
 		let desc = self.get_string(name_and_type.descriptor_index)?;
 		let desc = FieldType::parse(&desc)?;
-		Ok(FieldRef {
-			class,
-			name,
-			desc,
-		})
+		Ok(FieldRef { class, name, desc })
 	}
 
 	fn resolve_method_ref(&self, index: u16) -> Result<MethodRef, ConstantPoolError> {
@@ -80,11 +84,7 @@ pub trait ConstantPoolExt: ConstantPoolGet {
 		let name = self.get_string(name_and_type.name_index)?;
 		let desc = self.get_string(name_and_type.descriptor_index)?;
 		let desc = MethodDescriptor::parse(&desc)?;
-		Ok(MethodRef {
-			class,
-			name,
-			desc,
-		})
+		Ok(MethodRef { class, name, desc })
 	}
 
 	/*// (name, desc)
@@ -111,12 +111,9 @@ pub trait ConstantPoolExt: ConstantPoolGet {
 		})
 	}
 
-
-
 	fn parse_attribute(&self, a: AttributeInfo) -> Result<Attribute, VmError> {
 		let name = self.get_string(a.attribute_name_index)?;
-		trace!("Parsing attribute with name: {}", name);
-
+		// trace!("Parsing attribute with name: {}", name);
 
 		match name.as_ref() {
 			"Code" => {
@@ -131,15 +128,9 @@ pub trait ConstantPoolExt: ConstantPoolGet {
 				let (_, lnt) = LineNumberTableAttribute::from_bytes((&a.info.as_slice(), 0))?;
 				Ok(Attribute::LineNumberTable(lnt))
 			}
-			"StackMapTable" => {
-				Ok(Attribute::StackMapTable(a.info.clone()))
-			}
-			"Exceptions" => {
-				Ok(Attribute::Exceptions(a.info.clone()))
-			}
-			"InnerClasses" => {
-				Ok(Attribute::InnerClasses(a.info.clone()))
-			}
+			"StackMapTable" => Ok(Attribute::StackMapTable(a.info.clone())),
+			"Exceptions" => Ok(Attribute::Exceptions(a.info.clone())),
+			"InnerClasses" => Ok(Attribute::InnerClasses(a.info.clone())),
 			"Signature" => {
 				let signature_index = u16::from_be_bytes([a.info[0], a.info[1]]);
 				Ok(Attribute::Signature(signature_index))

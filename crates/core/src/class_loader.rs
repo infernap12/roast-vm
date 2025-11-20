@@ -1,23 +1,26 @@
+use crate::attributes::Attribute;
+use crate::bimage::Bimage;
+use crate::class::RuntimeClass;
+use crate::class_file::constant_pool::{ConstantPoolExt, ConstantPoolGet};
+use crate::class_file::{
+	ClassFile, ClassFlags, ConstantClassInfo, ConstantPoolEntry, FieldData, FieldFlags, MethodData,
+	MethodFlags,
+};
+use crate::native_libraries::NativeLibraries;
+use crate::{FieldType, MethodDescriptor};
+use dashmap::DashMap;
+use deku::DekuContainerRead;
+use libloading::os::windows::Library;
+use log::warn;
 use std::collections::hash_map::{Entry, Iter};
-use std::collections::HashMap;
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use deku::DekuContainerRead;
-use log::warn;
-use crate::attributes::Attribute;
-use crate::bimage::Bimage;
-use crate::class::RuntimeClass;
-use crate::class_file::{ClassFile, ClassFlags, ConstantClassInfo, ConstantPoolEntry, FieldData, FieldFlags, MethodData, MethodFlags};
-use crate::class_file::constant_pool::{ConstantPoolExt, ConstantPoolGet};
-use crate::{FieldType, MethodDescriptor};
 
 pub type LoaderRef = Arc<Mutex<ClassLoader>>;
 
-#[deprecated(
-	note = "This method is deprecated and will be removed in future versions"
-)]
+#[deprecated(note = "This method is deprecated and will be removed in future versions")]
 pub fn resolve_path(what: &str) -> Result<(PathBuf, String), String> {
 	let (module, fqn) = what.split_once("/").unwrap_or(("", what));
 	let module = dot_to_path(module);
@@ -36,15 +39,22 @@ pub fn resolve_path(what: &str) -> Result<(PathBuf, String), String> {
 
 		let classes_path = module_path.join("jmod/classes");
 		if !classes_path.exists() {
-			return Err(format!("Could not find jmod/classes directory in module: {}", module));
+			return Err(format!(
+				"Could not find jmod/classes directory in module: {}",
+				module
+			));
 		}
 		classes_path
-	} else { base.to_path_buf() };
-
+	} else {
+		base.to_path_buf()
+	};
 
 	let class_path = path.join(format!("{}.class", fqn));
 	if !class_path.exists() {
-		return Err(format!("Could not find class: {} in module: {}", fqn, module));
+		return Err(format!(
+			"Could not find class: {} in module: {}",
+			fqn, module
+		));
 	}
 
 	Ok((class_path, path_to_dot(&fqn)))
@@ -77,9 +87,10 @@ pub fn resolve_path(what: &str) -> Result<(PathBuf, String), String> {
 /// ```
 #[derive(Default)]
 pub struct ClassLoader {
-	classes: HashMap<String, Arc<RuntimeClass>>,
+	classes: DashMap<String, Arc<RuntimeClass>>,
 	bimage: Bimage,
-	pub needs_init: Vec<Arc<RuntimeClass>>
+	pub needs_init: Vec<Arc<RuntimeClass>>,
+	native_libraries: NativeLibraries,
 }
 
 impl ClassLoader {
@@ -98,7 +109,7 @@ impl ClassLoader {
 	/// * `what` - A fully qualified class name (e.g. "java.base/java.lang.Object" or "java.lang.String")
 	///
 	/// # Returns
-	/// * `Ok(Arc<ClassFile>)` - A thread-safe reference-counted pointer to the requested `ClassFile` on success, 
+	/// * `Ok(Arc<ClassFile>)` - A thread-safe reference-counted pointer to the requested `ClassFile` on success,
 	///   either retrieved from the storage or successfully loaded.
 	/// * `Err(String)` - An error message string if the class could not be loaded due to some failure.
 	///
@@ -133,14 +144,14 @@ impl ClassLoader {
 	}
 
 	/* pub fn classes(&self) -> HashMap<String, ClassFile> {
-		 self.classes.clone()
-	 }*/
+		self.classes.clone()
+	}*/
 
 	fn load_class(&mut self, what: &str) -> Result<Arc<RuntimeClass>, String> {
 		let (module, class_fqn) = ("", what);
 		let bytes = self.bimage.get_class(module, class_fqn).unwrap_or_else(|| {
 			let path = format!("./data/{what}.class");
-			println!("{}", path);
+			log::info!("Loading class from path: {}", path);
 			let mut class_file = File::open(path).unwrap();
 			let mut bytes = Vec::new();
 			class_file.read_to_end(&mut bytes).unwrap();
@@ -151,28 +162,33 @@ impl ClassLoader {
 		let runtime = self.runtime_class(cf);
 		let arced = Arc::new(runtime);
 		let option = self.classes.insert(class_fqn.to_string(), arced.clone());
-		if option.is_some() { warn!("Replaced loaded class: {}", class_fqn) }
+		if option.is_some() {
+			warn!("Replaced loaded class: {}", class_fqn)
+		}
 		Ok(arced)
 	}
-
 
 	fn runtime_class(&mut self, class_file: ClassFile) -> RuntimeClass {
 		let constant_pool = class_file.constant_pool.clone();
 		let access_flags = ClassFlags::from(class_file.access_flags);
 		let this_class = {
-			let cl = class_file.constant_pool.get_class_info(class_file.this_class).unwrap();
+			let cl = class_file
+				.constant_pool
+				.get_class_info(class_file.this_class)
+				.unwrap();
 			let name = class_file.constant_pool.get_string(cl.name_index).unwrap();
 			name
 		};
 		let super_class = {
-			if (this_class.eq("java/lang/Object"))
-			{
+			if (this_class.eq("java/lang/Object")) {
 				debug_assert_eq!(this_class, "java/lang/Object");
 				debug_assert_eq!(class_file.super_class, 0u16);
 				None
 			} else {
 				debug_assert_ne!(class_file.super_class, 0u16);
-				let super_info = constant_pool.get_class_info(class_file.super_class).unwrap();
+				let super_info = constant_pool
+					.get_class_info(class_file.super_class)
+					.unwrap();
 				let name = constant_pool.get_string(**super_info).unwrap();
 				Some(self.get_or_load(&*name).unwrap())
 			}
@@ -187,60 +203,73 @@ impl ClassLoader {
 		}
 
 		let interfaces = class_file
-			.interfaces.iter().copied()
+			.interfaces
+			.iter()
+			.copied()
 			.map(|e| {
 				let interface_info = constant_pool.get_class_info(e).unwrap();
 				let name = constant_pool.get_string(interface_info.name_index).unwrap();
 				self.get_or_load(&name).unwrap()
-			}).collect::<Vec<_>>();
+			})
+			.collect::<Vec<_>>();
 
 		let fields = class_file
-			.fields.iter()
+			.fields
+			.iter()
 			.map(|e| {
 				let name = constant_pool.get_string(e.name_index).unwrap();
 				let flags = FieldFlags::from(e.access_flags);
-				let desc = constant_pool.get_string(e.descriptor_index).map(|e|{
-					FieldType::parse(&e)
-				}).unwrap().unwrap();
-				let value = e.attributes.first()
-					.and_then(|x| {
-						if let Attribute::ConstantValue(val) = constant_pool.parse_attribute(x.clone()).unwrap() {
-							Some(val)
-						} else {
-							None
-						}
-					});
+				let desc = constant_pool
+					.get_string(e.descriptor_index)
+					.map(|e| FieldType::parse(&e))
+					.unwrap()
+					.unwrap();
+				let value = e.attributes.first().and_then(|x| {
+					if let Attribute::ConstantValue(val) =
+						constant_pool.parse_attribute(x.clone()).unwrap()
+					{
+						Some(val.into())
+					} else {
+						None
+					}
+				});
+				let value = Arc::new(Mutex::new(value));
 				FieldData {
 					name,
 					flags,
 					desc,
 					value,
 				}
-			}).collect::<Vec<_>>();
+			})
+			.collect::<Vec<_>>();
 
-
-		let methods = class_file.methods.iter().map(|e| {
-			let name = constant_pool.get_string(e.name_index).unwrap();
-			let flags = MethodFlags::from(e.access_flags);
-			let desc = constant_pool.get_string(e.descriptor_index).map(|e|{
-				MethodDescriptor::parse(&e)
-			}).unwrap().unwrap();
-			let code = e.attributes.first()
-				.and_then(|x| {
-					if let Attribute::Code(val) = constant_pool.parse_attribute(x.clone()).unwrap() {
+		let methods = class_file
+			.methods
+			.iter()
+			.map(|e| {
+				let name = constant_pool.get_string(e.name_index).unwrap();
+				let flags = MethodFlags::from(e.access_flags);
+				let desc = constant_pool
+					.get_string(e.descriptor_index)
+					.map(|e| MethodDescriptor::parse(&e))
+					.unwrap()
+					.unwrap();
+				let code = e.attributes.first().and_then(|x| {
+					if let Attribute::Code(val) = constant_pool.parse_attribute(x.clone()).unwrap()
+					{
 						Some(val)
 					} else {
 						None
 					}
 				});
-			MethodData {
-				name,
-				flags,
-				desc,
-				code,
-			}
-		}).collect::<Vec<_>>();
-
+				MethodData {
+					name,
+					flags,
+					desc,
+					code,
+				}
+			})
+			.collect::<Vec<_>>();
 
 		RuntimeClass {
 			constant_pool,
@@ -252,6 +281,13 @@ impl ClassLoader {
 			methods,
 			init_state: Mutex::new(crate::class::InitState::NotInitialized),
 		}
+	}
+
+	unsafe fn find_native<T>(&self, name: String) -> libloading::os::windows::Symbol<T> {
+		// for (key, value) in self.native_libraries.iter() {
+		// 	// value.get()
+		// }
+		todo!("class_loader find native")
 	}
 }
 

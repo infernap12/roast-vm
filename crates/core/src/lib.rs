@@ -21,9 +21,11 @@ use crate::class_file::constant_pool::{ConstantPoolError, ConstantPoolGet};
 use crate::class_file::{Bytecode, ClassFile, ConstantPoolEntry, MethodData};
 use crate::object::Object;
 use crate::thread::VmThread;
+use crate::Value::Reference;
 use deku::{DekuContainerRead, DekuError};
 use deku_derive::{DekuRead, DekuWrite};
-use log::warn;
+use env_logger::Builder;
+use log::{warn, LevelFilter};
 use std::fmt::{Debug, Display, Formatter};
 use std::fs::File;
 use std::io::Read;
@@ -35,7 +37,9 @@ mod bimage;
 mod class;
 mod class_file;
 mod class_loader;
+mod jni;
 mod macros;
+mod native_libraries;
 mod object;
 mod rng;
 mod thread;
@@ -46,7 +50,12 @@ const NULL: Value = Value::Reference(None);
 // include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 /// pseudo main
 pub fn run() {
-	env_logger::init();
+	Builder::from_default_env()
+		.filter_level(LevelFilter::Trace)
+		.filter_module("deku", LevelFilter::Warn)
+		.filter_module("jvm_rs_core::class_file::class_file", LevelFilter::Info)
+		.filter_module("jvm_rs_core::attributes", LevelFilter::Info)
+		.init();
 	// let mut cl = ClassLoader::new().unwrap();
 	// cl.load_class("org.example.App").expect("TODO: panic message");
 	// let clazz = cl.get_or_load("org.example.App").unwrap();
@@ -54,11 +63,11 @@ pub fn run() {
 	//     std::fs::write(format!("./output/{}-{}.txt", i, class_loader::path_to_dot(k)), format!("{}\n{}", k, v)).unwrap();
 	// }
 
-	let mut class_file = File::open("./data/org/example/App.class").unwrap();
+	/*let mut class_file = File::open("./data/org/example/Main.class").unwrap();
 	let mut bytes = Vec::new();
 	class_file.read_to_end(&mut bytes).unwrap();
 	let (_rest, clazz) = ClassFile::from_bytes((bytes.as_ref(), 0)).unwrap();
-	let method = clazz.methods.iter().nth(1).unwrap().clone();
+	let method = clazz.methods.get(1).unwrap().clone();
 	let code = method
 		.attributes
 		.iter()
@@ -88,9 +97,9 @@ pub fn run() {
 			}
 		})
 		.unwrap();
-	println!("{}", clazz);
+	println!("{}", clazz);*/
 	// let pool = clazz.constant_pool;
-	let mut vm = Vm::new("org/example/App");
+	let mut vm = Vm::new("org/example/Main");
 
 	// println!("{:?}", ops);
 	// println!("{:?}", var_table.local_variable_table);
@@ -295,6 +304,45 @@ impl MethodDescriptor {
 	}
 	fn psvm() -> Self {
 		MethodDescriptor::parse("([Ljava/lang/String;)V").unwrap()
+	}
+}
+
+impl Display for BaseType {
+	fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+		match self {
+			BaseType::Byte => write!(f, "B"),
+			BaseType::Char => write!(f, "C"),
+			BaseType::Double => write!(f, "D"),
+			BaseType::Float => write!(f, "F"),
+			BaseType::Int => write!(f, "I"),
+			BaseType::Long => write!(f, "J"),
+			BaseType::Short => write!(f, "S"),
+			BaseType::Boolean => write!(f, "Z"),
+		}
+	}
+}
+
+impl Display for FieldType {
+	fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+		match self {
+			FieldType::Base(base) => write!(f, "{}", base),
+			FieldType::ClassType(name) => write!(f, "L{};", name),
+			FieldType::ArrayType(component) => write!(f, "[{}", component),
+		}
+	}
+}
+
+impl Display for MethodDescriptor {
+	fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+		write!(f, "(")?;
+		for param in &self.parameters {
+			write!(f, "{}", param)?;
+		}
+		write!(f, ")")?;
+		match &self.return_type {
+			Some(ret) => write!(f, "{}", ret),
+			None => write!(f, "V"),
+		}
 	}
 }
 
@@ -516,7 +564,13 @@ impl Frame {
 				let result = init_class
 					.find_field(&field_ref.name, field_ref.desc)
 					.expect("TO hecken work");
-				let constant = result.value.clone().unwrap();
+				let constant = result
+					.value
+					.lock()
+					.unwrap()
+					.clone()
+					.expect("Static field was not initialised");
+				self.stack.push(constant.into());
 
 				// let (code, pool) = {
 				// 	let mut loader = self.vm.loader.lock().unwrap();
@@ -526,7 +580,6 @@ impl Frame {
 				// 		(code, pool)
 				// };
 				// println!("{:?}", field);
-				todo!("Finish get static");
 				Ok(ExecutionResult::Continue)
 			}
 
@@ -542,7 +595,7 @@ impl Frame {
 					let class = loader.get_or_load(&meth.class).unwrap();
 					let pool = class.constant_pool.clone();
 					let code = class
-						.find_method(&meth.name, meth.desc)
+						.find_method(&meth.name, &meth.desc)
 						.unwrap()
 						.code
 						.clone()
@@ -573,6 +626,27 @@ impl Frame {
 					self.stack.push(val)
 				}
 				// todo!("Implement invoke static {}", index)
+				Ok(ExecutionResult::Continue)
+			}
+
+			Ops::aconst_null => {
+				self.stack.push(NULL);
+				Ok(ExecutionResult::Continue)
+			}
+
+			Ops::putstatic(index) => {
+				let field_ref = self.pool.resolve_field(*index)?;
+				println!("Getting static field {field_ref:?}");
+
+				let init_class = self
+					.thread
+					.get_or_resolve_class(&field_ref.class, self.thread.clone())
+					.expect("TO hecken work");
+				let result = init_class
+					.find_field(&field_ref.name, field_ref.desc)
+					.expect("TO hecken work");
+				let value = self.stack.pop().expect("stack to have value");
+				*result.value.lock().unwrap() = Some(value);
 				Ok(ExecutionResult::Continue)
 			}
 
