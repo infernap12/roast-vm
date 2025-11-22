@@ -95,3 +95,16 @@ pub extern "system" fn Java_org_example_Main_getTime<'local>(
 		.unwrap()
 		.as_millis() as jlong
 }
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_org_example_MockIO_println<'local>(
+	mut env: JNIEnv<'local>,
+	jclass: JClass<'local>,
+	input: jlong,
+) {
+	// let input: String = env
+	// 	.get_string(&input)
+	// 	.expect("Couldn't get java string!")
+	// 	.into();
+	println!("{input}")
+}

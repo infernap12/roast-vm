@@ -2,17 +2,19 @@ use crate::class::RuntimeClass;
 use crate::class_file::{ClassFile, MethodData, MethodRef};
 use crate::class_loader::{ClassLoader, LoaderRef};
 use crate::jni::create_jni_function_table;
+use crate::object_manager::ObjectManager;
 use crate::vm::Vm;
 use crate::{BaseType, FieldType, Frame, MethodDescriptor, Value, VmError};
 use deku::DekuError::Incomplete;
-use jni::sys::jlong;
+use jni::sys::{jboolean, jbyte, jchar, jdouble, jfloat, jint, jlong, jobject, jshort};
 use jni::JNIEnv;
 use libffi::low::call;
 use libffi::middle::*;
 use log::{trace, warn};
+use std::any::Any;
 use std::ops::Add;
 use std::ptr::null_mut;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::vec::IntoIter;
 
 type MethodCallResult = Result<Option<Value>, VmError>;
@@ -22,15 +24,17 @@ pub struct VmThread {
 	pub vm: Arc<Vm>,
 	pub loader: Arc<Mutex<ClassLoader>>,
 	pub frame_stack: Vec<Frame>,
+	pub gc: Arc<RwLock<ObjectManager>>,
 }
 
 impl VmThread {
 	pub fn new(vm: Arc<Vm>, loader: Option<LoaderRef>) -> Self {
 		let loader = loader.unwrap_or(vm.loader.clone());
 		Self {
-			vm,
+			vm: vm.clone(),
 			loader,
 			frame_stack: Vec::new(),
+			gc: vm.gc.clone(),
 		}
 	}
 
@@ -63,6 +67,14 @@ impl VmThread {
 		}
 
 		Ok(runtime_class)
+	}
+
+	pub fn get_class(&self, what: &str) -> Result<Arc<RuntimeClass>, VmError> {
+		self.loader
+			.lock()
+			.unwrap()
+			.get_or_load(what)
+			.map_err(VmError::LoaderError)
 	}
 
 	/// Initialize a class following JVM Spec 5.5.
@@ -157,7 +169,8 @@ impl VmThread {
 			desc: MethodDescriptor::psvm(),
 		};
 
-		self.invoke(method_ref, thread).expect("Main method died");
+		self.invoke(method_ref, Vec::new(), thread)
+			.expect("Main method died");
 		return ();
 
 		let class = self.get_or_resolve_class(what, thread.clone()).unwrap();
@@ -177,31 +190,38 @@ impl VmThread {
 		}
 	}
 
-	pub fn invoke(&self, method_reference: MethodRef, thread: Arc<VmThread>) -> MethodCallResult {
+	pub fn invoke(
+		&self,
+		method_reference: MethodRef,
+		args: Vec<Value>,
+		thread: Arc<VmThread>,
+	) -> MethodCallResult {
 		let class = self.get_or_resolve_class(&method_reference.class, thread.clone())?;
 		let resolved_method = class
 			.find_method(&method_reference.name, &method_reference.desc)
 			.unwrap();
-		println!("invoking {}: {}", method_reference.name, class.this_class);
+		trace!(
+			"invoking '{}' from {}",
+			method_reference.name,
+			class.this_class
+		);
 		if resolved_method.flags.ACC_NATIVE {
-			unsafe {
-				return self.invoke_native(&method_reference);
-			}
+			return self.invoke_native(&method_reference, args);
 		}
 		let mut frame = Frame::new(
 			resolved_method.code.clone().unwrap(),
 			class.constant_pool.clone(),
-			vec![],
+			args,
 			thread.clone(),
 		);
 		frame.execute()
 	}
 
-	pub fn invoke_native(&self, method: &MethodRef) -> MethodCallResult {
+	pub fn invoke_native(&self, method: &MethodRef, args: Vec<Value>) -> MethodCallResult {
 		let symbol_name = generate_jni_method_name(method);
-		println!("{:?}", &symbol_name);
+		trace!("searching for native symbol: {:?}", &symbol_name);
 
-		unsafe {
+		let result = unsafe {
 			// manually load relevant library for poc
 			let lib = libloading::os::windows::Library::new(
 				"C:\\Program Files\\Java\\jdk-25\\bin\\jvm_rs.dll",
@@ -216,19 +236,88 @@ impl VmThread {
 			);
 			// build actual JNI interface that forms the table of
 			// native functions that can be used to manipulate the JVM
-			let JNIEnv = create_jni_function_table();
+			let jnienv = create_jni_function_table();
+
+			// let args = build_args(args);
 
 			// coerce my method descriptors into libffi C equivalents, then call
-			let l = method
-				.build_cif()
-				.call::<jlong>(cp, &*vec![arg(&JNIEnv), arg(&null_mut::<()>())]);
+			// let l = method.build_cif().call::<jlong>(cp, args.as_ref());
 
-			println!("{l}");
-		}
+			let mut storage = Vec::new();
+			trace!("passing {args:?} to native fn");
+			let built_args = build_args(args, &mut storage);
+			let cif = method.build_cif();
 
-		Ok(None)
-		// todo!("Invoke native")
+			match &method.desc.return_type {
+				None => {
+					cif.call::<()>(cp, built_args.as_ref());
+					Ok(None)
+				}
+				Some(FieldType::Base(BaseType::Long)) => {
+					let v = cif.call::<jlong>(cp, built_args.as_ref());
+					Ok(Some(Value::Long(v)))
+				}
+				Some(FieldType::Base(BaseType::Int)) => {
+					let v = cif.call::<jint>(cp, built_args.as_ref());
+					Ok(Some(Value::Int(v)))
+				}
+				Some(FieldType::Base(BaseType::Float)) => {
+					let v = cif.call::<jfloat>(cp, built_args.as_ref());
+					Ok(Some(Value::Float(v)))
+				}
+				Some(FieldType::Base(BaseType::Double)) => {
+					let v = cif.call::<jdouble>(cp, built_args.as_ref());
+					Ok(Some(Value::Double(v)))
+				}
+				Some(FieldType::Base(BaseType::Boolean)) => {
+					let v = cif.call::<jboolean>(cp, built_args.as_ref());
+					Ok(Some(Value::Int(v as i32)))
+				}
+				Some(FieldType::Base(BaseType::Byte)) => {
+					let v = cif.call::<jbyte>(cp, built_args.as_ref());
+					Ok(Some(Value::Byte(v)))
+				}
+				Some(FieldType::Base(BaseType::Char)) => {
+					let v = cif.call::<jchar>(cp, built_args.as_ref());
+					Ok(Some(Value::Char(v)))
+				}
+				Some(FieldType::Base(BaseType::Short)) => {
+					let v = cif.call::<jshort>(cp, built_args.as_ref());
+					Ok(Some(Value::Short(v)))
+				}
+				Some(FieldType::ClassType(_)) | Some(FieldType::ArrayType(_)) => {
+					let v = cif.call::<jobject>(cp, built_args.as_ref());
+					// TODO: Convert jobject to Reference properly
+					Ok(Some(Value::Reference(None)))
+				}
+			}
+		};
+		warn!("Invoke native not final");
+		result
 	}
+}
+
+fn build_args<'a>(params: Vec<Value>, storage: &'a mut Vec<Box<dyn Any>>) -> Vec<Arg<'a>> {
+	// Store values in the provided storage
+	storage.push(Box::new(create_jni_function_table()) as Box<dyn Any>);
+	storage.push(Box::new(std::ptr::null_mut::<()>()) as Box<dyn Any>);
+
+	for value in params {
+		match value {
+			Value::Int(x) => storage.push(Box::new(x) as Box<dyn Any>),
+			Value::Boolean(x) => storage.push(Box::new(x) as Box<dyn Any>),
+			Value::Char(x) => storage.push(Box::new(x) as Box<dyn Any>),
+			Value::Float(x) => storage.push(Box::new(x) as Box<dyn Any>),
+			Value::Double(x) => storage.push(Box::new(x) as Box<dyn Any>),
+			Value::Byte(x) => storage.push(Box::new(x) as Box<dyn Any>),
+			Value::Short(x) => storage.push(Box::new(x) as Box<dyn Any>),
+			Value::Long(x) => storage.push(Box::new(x) as Box<dyn Any>),
+			Value::Reference(x) => storage.push(Box::new(x) as Box<dyn Any>),
+		}
+	}
+
+	// Create args referencing the storage
+	storage.iter().map(|boxed| arg(&**boxed)).collect()
 }
 
 pub fn generate_jni_method_name(method_ref: &MethodRef) -> String {

@@ -15,20 +15,21 @@
 //! - [`MethodDescriptor`] - Method signature information
 //! - [`FieldType`] - Field type information
 
-use crate::attributes::{Attribute, CodeAttribute, Ops};
+use crate::attributes::{Attribute, CodeAttribute};
 use crate::class_file::constant_pool::ConstantPoolExt;
 use crate::class_file::constant_pool::{ConstantPoolError, ConstantPoolGet};
 use crate::class_file::{Bytecode, ClassFile, ConstantPoolEntry, MethodData};
 use crate::object::Object;
 use crate::thread::VmThread;
-use crate::Value::Reference;
 use deku::{DekuContainerRead, DekuError};
 use deku_derive::{DekuRead, DekuWrite};
 use env_logger::Builder;
-use log::{warn, LevelFilter};
+use instructions::Ops;
+use log::{trace, warn, LevelFilter};
 use std::fmt::{Debug, Display, Formatter};
 use std::fs::File;
 use std::io::Read;
+use std::ops::Deref;
 use std::sync::{Arc, Mutex};
 use vm::Vm;
 
@@ -37,10 +38,12 @@ mod bimage;
 mod class;
 mod class_file;
 mod class_loader;
+mod instructions;
 mod jni;
 mod macros;
 mod native_libraries;
 mod object;
+mod object_manager;
 mod rng;
 mod thread;
 mod vm;
@@ -55,6 +58,7 @@ pub fn run() {
 		.filter_module("deku", LevelFilter::Warn)
 		.filter_module("jvm_rs_core::class_file::class_file", LevelFilter::Info)
 		.filter_module("jvm_rs_core::attributes", LevelFilter::Info)
+		.filter_module("jvm_rs_core::instructions", LevelFilter::Info)
 		.init();
 	// let mut cl = ClassLoader::new().unwrap();
 	// cl.load_class("org.example.App").expect("TODO: panic message");
@@ -118,7 +122,7 @@ enum Value {
 	/// Boolean value (true/false)
 	Boolean(bool),
 	/// Unicode character
-	Char(char),
+	Char(u16),
 	/// 32-bit floating point
 	Float(f32),
 	/// 64-bit floating point
@@ -133,6 +137,23 @@ enum Value {
 	Long(i64),
 	/// Reference to an object (or null)
 	Reference(Option<ObjectRef>),
+}
+
+impl Display for Value {
+	fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+		match self {
+			Value::Boolean(b) => write!(f, "bool({})", b),
+			Value::Char(c) => write!(f, "char({})", char::from_u32(*c as u32).unwrap_or('?')),
+			Value::Float(fl) => write!(f, "float({})", fl),
+			Value::Double(d) => write!(f, "double({})", d),
+			Value::Byte(b) => write!(f, "byte({})", b),
+			Value::Short(s) => write!(f, "short({})", s),
+			Value::Int(i) => write!(f, "int({})", i),
+			Value::Long(l) => write!(f, "long({})", l),
+			Value::Reference(Some(obj)) => write!(f, "Ref({})", obj.lock().unwrap().id),
+			Value::Reference(None) => write!(f, "null"),
+		}
+	}
 }
 
 /// Represents a JVM stack frame for method execution.
@@ -210,12 +231,21 @@ impl Frame {
 				Ok(ExecutionResult::ReturnValue(val)) => return Ok(Some(val)),
 				Ok(_) => {
 					println!(
-						"State:\n\tStack: {:?}\n\tLocals :{:?}\n",
-						self.stack, self.vars
+						"State:\n\tStack: [{}]\n\tLocals: [{}]\n",
+						self.stack
+							.iter()
+							.map(|v| v.to_string())
+							.collect::<Vec<_>>()
+							.join(", "),
+						self.vars
+							.iter()
+							.map(|v| v.to_string())
+							.collect::<Vec<_>>()
+							.join(", ")
 					)
 				}
-				Err(_) => {
-					panic!("Mission failed, we'll get em next time")
+				Err(x) => {
+					panic!("Mission failed, we'll get em next time:\n{x}")
 				}
 			}
 		}
@@ -304,6 +334,25 @@ impl MethodDescriptor {
 	}
 	fn psvm() -> Self {
 		MethodDescriptor::parse("([Ljava/lang/String;)V").unwrap()
+	}
+
+	pub fn arg_width(&self) -> usize {
+		self.parameters.iter().fold(0, |acc, e| {
+			acc + match e {
+				FieldType::Base(base) => match base {
+					BaseType::Byte => 1,
+					BaseType::Char => 1,
+					BaseType::Double => 2,
+					BaseType::Float => 1,
+					BaseType::Int => 1,
+					BaseType::Long => 2,
+					BaseType::Short => 1,
+					BaseType::Boolean => 1,
+				},
+				FieldType::ClassType(_) => 1,
+				FieldType::ArrayType(_) => 1,
+			}
+		})
 	}
 }
 
@@ -405,6 +454,51 @@ impl From<DekuError> for VmError {
 impl Frame {
 	fn execute_instruction(&mut self, op: &Ops) -> Result<ExecutionResult, VmError> {
 		match op {
+			// Constants
+			Ops::aconst_null => {
+				self.stack.push(NULL);
+				Ok(ExecutionResult::Continue)
+			}
+
+			Ops::iconst_m1 => {
+				self.stack.push(Value::Int(-1));
+				Ok(ExecutionResult::Continue)
+			}
+
+			Ops::iconst_0 => {
+				self.stack.push(Value::Int(0));
+				Ok(ExecutionResult::Continue)
+			}
+
+			Ops::iconst_1 => {
+				self.stack.push(Value::Int(1));
+				Ok(ExecutionResult::Continue)
+			}
+
+			Ops::iconst_2 => {
+				self.stack.push(Value::Int(2));
+				Ok(ExecutionResult::Continue)
+			}
+
+			Ops::iconst_3 => {
+				self.stack.push(Value::Int(3));
+				Ok(ExecutionResult::Continue)
+			}
+
+			Ops::iconst_4 => {
+				self.stack.push(Value::Int(4));
+				Ok(ExecutionResult::Continue)
+			}
+
+			Ops::iconst_5 => {
+				self.stack.push(Value::Int(5));
+				Ok(ExecutionResult::Continue)
+			}
+
+			Ops::bipush(byte) => {
+				self.stack.push(Value::Int(*byte as i32));
+				Ok(ExecutionResult::Continue)
+			}
 			Ops::ldc(index) => {
 				let thing = self.pool.get_constant(index.to_owned() as u16)?;
 				println!("\tLoading constant: {}", thing);
@@ -457,42 +551,44 @@ impl Frame {
 				};
 				if let Some(x) = resolved {
 					self.stack.push(x);
+					self.stack.push(Value::Reference(None));
 				};
 				Ok(ExecutionResult::Continue)
 			}
-			// store
-			Ops::fstore(index) => {
-				store!(self, f, *index as usize)
-			}
-			Ops::fstore_0 => {
-				store!(self, f, 0)
-			}
-			Ops::fstore_1 => {
-				store!(self, f, 1)
-			}
-			Ops::fstore_2 => {
-				store!(self, f, 2)
-			}
-			Ops::fstore_3 => {
-				store!(self, f, 3)
-			}
-			Ops::dstore(index) => {
-				store!(self, d, *index as usize)
-			}
-			Ops::dstore_0 => {
-				store!(self, d, 0)
-			}
-			Ops::dstore_1 => {
-				store!(self, d, 1)
-			}
-			Ops::dstore_2 => {
-				store!(self, d, 2)
-			}
-			Ops::dstore_3 => {
-				store!(self, d, 3)
-			}
 
-			// load
+			// loads
+
+			//iload
+			Ops::iload(index) => {
+				load!(self, i, *index as usize)
+			}
+			Ops::iload_0 => {
+				load!(self, i, 0)
+			}
+			Ops::iload_1 => {
+				load!(self, i, 1)
+			}
+			Ops::iload_2 => {
+				load!(self, i, 2)
+			}
+			Ops::iload_3 => {
+				load!(self, i, 3)
+			}
+			Ops::lload(index) => {
+				load!(self, l, *index as usize)
+			}
+			Ops::lload_0 => {
+				load!(self, l, 0)
+			}
+			Ops::lload_1 => {
+				load!(self, l, 1)
+			}
+			Ops::lload_2 => {
+				load!(self, l, 2)
+			}
+			Ops::lload_3 => {
+				load!(self, l, 3)
+			}
 			Ops::fload(index) => {
 				load!(self, f, *index as usize)
 			}
@@ -523,19 +619,82 @@ impl Frame {
 			Ops::dload_3 => {
 				load!(self, d, 3)
 			}
+			Ops::aload(index) => {
+				load!(self, a, *index as usize)
+			}
+			Ops::aload_0 => {
+				load!(self, a, 0)
+			}
+			Ops::aload_1 => {
+				load!(self, a, 1)
+			}
+			Ops::aload_2 => {
+				load!(self, a, 2)
+			}
+			Ops::aload_3 => {
+				load!(self, a, 3)
+			}
 
-			Ops::f2d => {
-				if let Value::Float(float) = self.stack.pop().expect("Stack must have value") {
-					let double: f64 = float.into();
-					self.stack.push(Value::Double(double));
+			// store
+			Ops::fstore(index) => {
+				store!(self, f, *index as usize)
+			}
+			Ops::fstore_0 => {
+				store!(self, f, 0)
+			}
+			Ops::fstore_1 => {
+				store!(self, f, 1)
+			}
+			Ops::fstore_2 => {
+				store!(self, f, 2)
+			}
+			Ops::fstore_3 => {
+				store!(self, f, 3)
+			}
+			Ops::dstore(index) => {
+				store!(self, d, *index as usize)
+			}
+			Ops::dstore_0 => {
+				store!(self, d, 0)
+			}
+			Ops::dstore_1 => {
+				store!(self, d, 1)
+			}
+			Ops::dstore_2 => {
+				store!(self, d, 2)
+			}
+
+			Ops::dstore_3 => {
+				store!(self, d, 3)
+			}
+			Ops::lstore(index) => {
+				store!(self, l, *index as usize)
+			}
+			Ops::lstore_0 => {
+				store!(self, l, 0)
+			}
+			Ops::lstore_1 => {
+				store!(self, l, 1)
+			}
+			Ops::lstore_2 => {
+				store!(self, l, 2)
+			}
+
+			Ops::lstore_3 => {
+				store!(self, l, 3)
+			}
+
+			//Stack
+			Ops::dup => {
+				if let Some(value) = self.stack.last() {
+					self.stack.push(value.clone());
 					Ok(ExecutionResult::Continue)
 				} else {
-					Err(VmError::StackError(
-						"Popped value was not float".to_string(),
-					))
+					Err(VmError::StackError("Stack underflow".to_string()))
 				}
 			}
 
+			// Math
 			Ops::dadd => {
 				let value1 = self.stack.pop().expect("Stack must have value");
 				let value2 = self.stack.pop().expect("Stack must have value");
@@ -550,6 +709,23 @@ impl Frame {
 					)))
 				}
 			}
+
+			//Conversions
+			Ops::f2d => {
+				if let Value::Float(float) = self.stack.pop().expect("Stack must have value") {
+					let double: f64 = float.into();
+					self.stack.push(Value::Double(double));
+					Ok(ExecutionResult::Continue)
+				} else {
+					Err(VmError::StackError(
+						"Popped value was not float".to_string(),
+					))
+				}
+			}
+			// Control
+			Ops::return_void => Ok(ExecutionResult::Return(())),
+
+			// References
 
 			// get static field
 			// can init the field
@@ -571,44 +747,82 @@ impl Frame {
 					.clone()
 					.expect("Static field was not initialised");
 				self.stack.push(constant.into());
-
-				// let (code, pool) = {
-				// 	let mut loader = self.vm.loader.lock().unwrap();
-				// 	let class = loader.get_or_load(&field.class).unwrap();
-				// 	let field = class.get_static_field_value(&field)
-				// 		// let code = class.get_code(meth)?;
-				// 		(code, pool)
-				// };
-				// println!("{:?}", field);
 				Ok(ExecutionResult::Continue)
 			}
 
+			Ops::putstatic(index) => {
+				let field_ref = self.pool.resolve_field(*index)?;
+				trace!("Getting static field {field_ref:?}");
+
+				let init_class = self
+					.thread
+					.get_or_resolve_class(&field_ref.class, self.thread.clone())
+					.expect("TO hecken work");
+				let static_field = init_class
+					.find_field(&field_ref.name, field_ref.desc)
+					.expect("TO hecken work");
+				let value = self.stack.pop().expect("stack to have value");
+				*static_field.value.lock().unwrap() = Some(value);
+				Ok(ExecutionResult::Continue)
+			}
+
+			Ops::getfield(index) => {
+				todo!("op getfield: index - {}", index)
+			}
+
+			Ops::putfield(index) => {
+				let field_ref = self.pool.resolve_field(*index)?;
+				trace!("Setting field {field_ref:?}");
+				let init_class = self
+					.thread
+					.get_class(&field_ref.class)
+					.expect("pre initialised class");
+				// let static_field = init_class
+				// 	.find_field(&field_ref.name, field_ref.desc)
+				// 	.expect("TO hecken work");
+				let value = self.stack.pop().expect("value on stack");
+				if let Value::Reference(reference) = self.stack.pop().expect("object on stack") {
+					if let Some(object) = reference {
+						object.lock().unwrap().set_field(&field_ref.name, value);
+						Ok(ExecutionResult::Continue)
+					} else {
+						Err(VmError::StackError("Null pointer exception".to_string()))
+					}
+				} else {
+					Err(VmError::StackError(
+						"putfield tried to operate on a non object stack value".to_string(),
+					))
+				}
+
+				// todo!("op putfield: index - {}", index)
+			}
 			Ops::invokevirtual(index) => {
-				let meth = self.pool.resolve_method_ref(*index)?;
-				let params = meth.desc.num_arguments();
-				let last = self.stack.len() - 1;
-				let first = last - params + 1;
-				let slice = self.stack.get(first..last).unwrap().to_vec();
-				//sub slice param length + one, throw it to frame new
-				let (code, pool) = {
-					let mut loader = self.thread.loader.lock().unwrap();
-					let class = loader.get_or_load(&meth.class).unwrap();
-					let pool = class.constant_pool.clone();
-					let code = class
-						.find_method(&meth.name, &meth.desc)
-						.unwrap()
-						.code
-						.clone()
-						.unwrap();
-					(code, pool)
-				};
-				// let code = class.get_code(meth)?;
-				// let class = self.vm.loader.get_or_load(&meth.class).unwrap();
-				// let pool = &class.constant_pool;
-				let vars = slice;
-				let frame = Frame::new(code, pool.clone(), vars, self.thread.clone());
-				// println!("{:?}", meth);
-				// todo!("Finish invoke virtual");
+				let method_ref = self.pool.resolve_method_ref(*index)?;
+				let args_count = method_ref.desc.arg_width();
+				let args = self.stack.split_off(self.stack.len() - args_count);
+				let result = self.thread.invoke(method_ref, args, self.thread.clone())?;
+				if let Some(val) = result {
+					self.stack.push(val)
+				}
+				todo!("Finish invoke virtual");
+				Ok(ExecutionResult::Continue)
+			}
+
+			Ops::invokespecial(index) => {
+				let method_ref = self.pool.resolve_method_ref(*index)?;
+				let class = self
+					.thread
+					.get_or_resolve_class(&method_ref.class, self.thread.clone())?;
+
+				// the 1 represents the receiver
+				let args_count = method_ref.desc.arg_width() + 1;
+				let args = self.stack.split_off(self.stack.len() - args_count);
+
+				let result = self.thread.invoke(method_ref, args, self.thread.clone())?;
+				if let Some(val) = result {
+					self.stack.push(val)
+				}
+				// todo!("invoke special");
 				Ok(ExecutionResult::Continue)
 			}
 
@@ -617,40 +831,31 @@ impl Frame {
 				let class = self
 					.thread
 					.get_or_resolve_class(&method_ref.class, self.thread.clone())?;
-				// let method_data = class
-				// 	.find_method(&method_ref.name, method_ref.desc)?
-				// 	.clone();
 
-				let result = self.thread.invoke(method_ref, self.thread.clone())?;
+				let args_count = method_ref.desc.parameters.len();
+				let args = self.stack.split_off(self.stack.len() - args_count);
+
+				let result = self.thread.invoke(method_ref, args, self.thread.clone())?;
 				if let Some(val) = result {
 					self.stack.push(val)
 				}
-				// todo!("Implement invoke static {}", index)
+				warn!("invoke static not final {}", index);
 				Ok(ExecutionResult::Continue)
 			}
 
-			Ops::aconst_null => {
-				self.stack.push(NULL);
-				Ok(ExecutionResult::Continue)
-			}
-
-			Ops::putstatic(index) => {
-				let field_ref = self.pool.resolve_field(*index)?;
-				println!("Getting static field {field_ref:?}");
+			// can init class
+			Ops::new(index) => {
+				let class = self.pool.resolve_class_name(*index)?;
 
 				let init_class = self
 					.thread
-					.get_or_resolve_class(&field_ref.class, self.thread.clone())
+					.get_or_resolve_class(&class, self.thread.clone())
 					.expect("TO hecken work");
-				let result = init_class
-					.find_field(&field_ref.name, field_ref.desc)
-					.expect("TO hecken work");
-				let value = self.stack.pop().expect("stack to have value");
-				*result.value.lock().unwrap() = Some(value);
+				let object = self.thread.gc.write().unwrap().new(init_class);
+				self.stack.push(Value::Reference(Some(object)));
 				Ok(ExecutionResult::Continue)
+				// todo!("'New' instruction")
 			}
-
-			Ops::return_void => Ok(ExecutionResult::Return(())),
 			_ => {
 				todo!("Unimplemented op: {:?}", op)
 			}

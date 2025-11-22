@@ -67,8 +67,7 @@ pub trait ConstantPoolExt: ConstantPoolGet {
 
 	fn resolve_field(&self, index: u16) -> Result<FieldRef, ConstantPoolError> {
 		let fr = self.get_field_ref(index)?;
-		let class = self.get_class_info(fr.class_index)?;
-		let class = self.get_string(class.name_index)?;
+		let class = self.resolve_class_name(fr.class_index)?;
 		let name_and_type = self.get_name_and_type_info(fr.name_and_type_index)?;
 		let name = self.get_string(name_and_type.name_index)?;
 		let desc = self.get_string(name_and_type.descriptor_index)?;
@@ -76,10 +75,24 @@ pub trait ConstantPoolExt: ConstantPoolGet {
 		Ok(FieldRef { class, name, desc })
 	}
 
+	/// Resolves a class name from a constant pool class info entry
+	///
+	/// # Arguments
+	/// * `index` - Index into constant pool that must point to a CONSTANT_Class_info structure
+	///
+	/// # Returns
+	/// * Binary class name in internal JVM format (e.g. "java/lang/Object")
+	///
+	/// # Errors
+	/// * Returns ConstantPoolError if index is invalid or points to wrong type
+	fn resolve_class_name(&self, index: u16) -> Result<String, ConstantPoolError> {
+		let class_info = self.get_class_info(index)?;
+		self.get_string(class_info.name_index)
+	}
+
 	fn resolve_method_ref(&self, index: u16) -> Result<MethodRef, ConstantPoolError> {
 		let mr = self.get_method_ref(index)?;
-		let class = self.get_class_info(mr.class_index)?;
-		let class = self.get_string(class.name_index)?;
+		let class = self.resolve_class_name(mr.class_index)?;
 		let name_and_type = self.get_name_and_type_info(mr.name_and_type_index)?;
 		let name = self.get_string(name_and_type.name_index)?;
 		let desc = self.get_string(name_and_type.descriptor_index)?;

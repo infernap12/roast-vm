@@ -10,6 +10,7 @@ use crate::native_libraries::NativeLibraries;
 use crate::{FieldType, MethodDescriptor};
 use dashmap::DashMap;
 use deku::DekuContainerRead;
+use itertools::Itertools;
 use libloading::os::windows::Library;
 use log::warn;
 use std::collections::hash_map::{Entry, Iter};
@@ -149,14 +150,10 @@ impl ClassLoader {
 
 	fn load_class(&mut self, what: &str) -> Result<Arc<RuntimeClass>, String> {
 		let (module, class_fqn) = ("", what);
-		let bytes = self.bimage.get_class(module, class_fqn).unwrap_or_else(|| {
-			let path = format!("./data/{what}.class");
-			log::info!("Loading class from path: {}", path);
-			let mut class_file = File::open(path).unwrap();
-			let mut bytes = Vec::new();
-			class_file.read_to_end(&mut bytes).unwrap();
-			bytes
-		});
+		let bytes = self
+			.bimage
+			.get_class(module, class_fqn)
+			.unwrap_or_else(|| Self::load_class_from_disk(what));
 		let (_, cf) = ClassFile::from_bytes((bytes.as_ref(), 0))
 			.map_err(|e| format!("failed to parse class file: {}", e))?;
 		let runtime = self.runtime_class(cf);
@@ -166,6 +163,20 @@ impl ClassLoader {
 			warn!("Replaced loaded class: {}", class_fqn)
 		}
 		Ok(arced)
+	}
+
+	fn load_class_from_disk(what: &str) -> Vec<u8> {
+		let class_path = std::env::args()
+			.nth(1)
+			.unwrap_or("./data".to_string())
+			.replace("\\", "/");
+
+		let path = format!("{class_path}/{what}.class");
+		log::info!("Loading class from path: {}", path);
+		let mut class_file = File::open(path).unwrap();
+		let mut bytes = Vec::new();
+		class_file.read_to_end(&mut bytes).unwrap();
+		bytes
 	}
 
 	fn runtime_class(&mut self, class_file: ClassFile) -> RuntimeClass {

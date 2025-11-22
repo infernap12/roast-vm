@@ -1,5 +1,6 @@
-use crate::attributes::{Attribute, AttributeInfo, CodeAttribute, Ops};
+use crate::attributes::{Attribute, AttributeInfo, CodeAttribute};
 use crate::class_file::constant_pool::{ConstantPoolError, ConstantPoolExt, ConstantPoolOwned};
+use crate::instructions::Ops;
 use crate::{BaseType, FieldType, MethodDescriptor, Value};
 use deku::ctx::Endian::Big;
 use deku::{DekuContainerRead, DekuError};
