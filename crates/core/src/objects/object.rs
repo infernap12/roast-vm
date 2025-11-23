@@ -1,11 +1,11 @@
 use crate::class::RuntimeClass;
-use crate::class_file::ClassFile;
-use crate::Value;
+use crate::value::Value;
 use dashmap::DashMap;
 use log::trace;
-use std::cell::RefCell;
 use std::fmt::Display;
 use std::sync::{Arc, Mutex};
+
+pub type ObjectReference = Arc<Mutex<Object>>;
 
 #[derive(Debug, Clone)]
 pub struct Object {
@@ -19,6 +19,14 @@ impl Object {
 		trace!("Fields for object:\n\t{:?}", self.fields);
 		trace!("Setting '{}' to '{}'", field_name, value);
 		self.fields.insert(field_name.to_string(), value);
+	}
+
+	pub fn get_field(&self, field_name: &str) -> Value {
+		trace!("Fields for object:\n\t{:?}", self.fields);
+		self.fields
+			.get(&field_name.to_string())
+			.map(|e| e.clone())
+			.unwrap_or(Value::NULL)
 	}
 }
 

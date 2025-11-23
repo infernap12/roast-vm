@@ -1,7 +1,7 @@
 use crate::class_file::ClassFile;
 use crate::class_loader::ClassLoader;
-use crate::object::Object;
-use crate::object_manager::ObjectManager;
+use crate::objects::object::Object;
+use crate::objects::object_manager::ObjectManager;
 use crate::thread::VmThread;
 use crate::Frame;
 use libloading::os::windows::Symbol;

@@ -1,5 +1,5 @@
 use crate::class_file::constant_pool::ConstantPoolError;
-use crate::Value;
+use crate::value::Value;
 
 #[macro_export]
 macro_rules! store {
@@ -7,7 +7,7 @@ macro_rules! store {
 		{
 			let index: usize = $index;
 			let value = $self.stack.pop().expect("Must contain value on stack");
-			println!("\tStoring: {value:?} into local[{index}]");
+			trace!("\tStoring: {value:?} into local[{index}]");
 			$self.vars[index] = value;
 			$self.vars[index + 1] = Value::Reference(None);
 			Ok(ExecutionResult::Continue)
@@ -20,12 +20,15 @@ macro_rules! store {
 		{
 			let index: usize = $index;
 			let value = $self.stack.pop().expect("Must contain value on stack");
-			println!("\tStoring: {value:?} into local[{index}]");
+			trace!("\tStoring: {value:?} into local[{index}]");
 			$self.vars[index] = value;
 			Ok(ExecutionResult::Continue)
 		}
 	}};
 	($self:expr, f, $index:expr) => {
+		store!($self, i, $index)
+	};
+	($self:expr, a, $index:expr) => {
 		store!($self, i, $index)
 	};
 }
@@ -36,7 +39,7 @@ macro_rules! load {
 		{
 			let index: usize = $index;
 			let value = $self.vars.get(index).expect("Local var to exist");
-			println!("\tLoading: local[{index}] - {value} onto stack");
+			trace!("\tLoading: local[{index}] - {value} onto stack");
 			$self.stack.push(value.clone());
 			Ok(ExecutionResult::Continue)
 		}

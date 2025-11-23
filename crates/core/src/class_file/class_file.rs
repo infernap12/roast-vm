@@ -1,7 +1,8 @@
 use crate::attributes::{Attribute, AttributeInfo, CodeAttribute};
 use crate::class_file::constant_pool::{ConstantPoolError, ConstantPoolExt, ConstantPoolOwned};
 use crate::instructions::Ops;
-use crate::{BaseType, FieldType, MethodDescriptor, Value};
+use crate::value::Value;
+use crate::{BaseType, FieldType, MethodDescriptor};
 use deku::ctx::Endian::Big;
 use deku::{DekuContainerRead, DekuError};
 use deku_derive::{DekuRead, DekuWrite};
@@ -660,10 +661,10 @@ pub enum Constant {
 impl From<Constant> for Value {
 	fn from(value: Constant) -> Self {
 		match value {
-			Constant::Int(x) => Value::Int(x),
-			Constant::Long(x) => Value::Long(x),
-			Constant::Float(x) => Value::Float(x),
-			Constant::Double(x) => Value::Double(x),
+			Constant::Int(x) => x.into(),
+			Constant::Long(x) => x.into(),
+			Constant::Float(x) => x.into(),
+			Constant::Double(x) => x.into(),
 			Constant::String(x) => {
 				todo!("Constant string")
 			}

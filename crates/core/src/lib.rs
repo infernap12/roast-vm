@@ -19,8 +19,9 @@ use crate::attributes::{Attribute, CodeAttribute};
 use crate::class_file::constant_pool::ConstantPoolExt;
 use crate::class_file::constant_pool::{ConstantPoolError, ConstantPoolGet};
 use crate::class_file::{Bytecode, ClassFile, ConstantPoolEntry, MethodData};
-use crate::object::Object;
+use crate::objects::array::{ArrayReference, Reference};
 use crate::thread::VmThread;
+use ::jni::sys::{jbyte, jchar, jdouble, jfloat, jint, jlong, jshort};
 use deku::{DekuContainerRead, DekuError};
 use deku_derive::{DekuRead, DekuWrite};
 use env_logger::Builder;
@@ -31,6 +32,7 @@ use std::fs::File;
 use std::io::Read;
 use std::ops::Deref;
 use std::sync::{Arc, Mutex};
+use value::{Primitive, Value};
 use vm::Vm;
 
 mod attributes;
@@ -42,19 +44,18 @@ mod instructions;
 mod jni;
 mod macros;
 mod native_libraries;
-mod object;
-mod object_manager;
+mod objects;
 mod rng;
 mod thread;
+mod value;
 mod vm;
-
-const NULL: Value = Value::Reference(None);
+// const NULL: Value = Value::Reference(None);
 
 // include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 /// pseudo main
 pub fn run() {
 	Builder::from_default_env()
-		.filter_level(LevelFilter::Trace)
+		.filter_level(LevelFilter::Info)
 		.filter_module("deku", LevelFilter::Warn)
 		.filter_module("jvm_rs_core::class_file::class_file", LevelFilter::Info)
 		.filter_module("jvm_rs_core::attributes", LevelFilter::Info)
@@ -110,51 +111,39 @@ pub fn run() {
 	// vm.method(ops.clone(), code, var_table);
 }
 
-/// A reference-counted, thread-safe pointer to an Object.
-type ObjectRef = Arc<Mutex<Object>>;
-
-/// Represents a JVM runtime value.
-///
-/// This enum covers all primitive types and object references that can exist
-/// on the operand stack or in local variables during bytecode execution.
-#[derive(Debug, Clone)]
-enum Value {
-	/// Boolean value (true/false)
-	Boolean(bool),
-	/// Unicode character
-	Char(u16),
-	/// 32-bit floating point
-	Float(f32),
-	/// 64-bit floating point
-	Double(f64),
-	/// Signed 8-bit integer
-	Byte(i8),
-	/// Signed 16-bit integer
-	Short(i16),
-	/// Signed 32-bit integer
-	Int(i32),
-	/// Signed 64-bit integer
-	Long(i64),
-	/// Reference to an object (or null)
-	Reference(Option<ObjectRef>),
-}
-
-impl Display for Value {
-	fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-		match self {
-			Value::Boolean(b) => write!(f, "bool({})", b),
-			Value::Char(c) => write!(f, "char({})", char::from_u32(*c as u32).unwrap_or('?')),
-			Value::Float(fl) => write!(f, "float({})", fl),
-			Value::Double(d) => write!(f, "double({})", d),
-			Value::Byte(b) => write!(f, "byte({})", b),
-			Value::Short(s) => write!(f, "short({})", s),
-			Value::Int(i) => write!(f, "int({})", i),
-			Value::Long(l) => write!(f, "long({})", l),
-			Value::Reference(Some(obj)) => write!(f, "Ref({})", obj.lock().unwrap().id),
-			Value::Reference(None) => write!(f, "null"),
-		}
-	}
-}
+// impl Value {
+// 	fn Int(i: i32) -> Value {
+// 		Value::Primitive(Primitive::Int(i))
+// 	}
+//
+// 	fn Float(f: f32) -> Value {
+// 		Value::Primitive(Primitive::Float(f))
+// 	}
+//
+// 	fn Double(d: f64) -> Value {
+// 		Value::Primitive(Primitive::Double(d))
+// 	}
+//
+// 	fn Long(l: i64) -> Value {
+// 		Value::Primitive(Primitive::Long(l))
+// 	}
+//
+// 	fn Char(c: u16) -> Value {
+// 		Value::Primitive(Primitive::Char(c))
+// 	}
+//
+// 	fn Boolean(b: bool) -> Value {
+// 		Value::Primitive(Primitive::Boolean(b))
+// 	}
+//
+// 	fn Byte(b: i8) -> Value {
+// 		Value::Primitive(Primitive::Byte(b))
+// 	}
+//
+// 	fn Short(s: i16) -> Value {
+// 		Value::Primitive(Primitive::Short(s))
+// 	}
+// }
 
 /// Represents a JVM stack frame for method execution.
 ///
@@ -224,13 +213,13 @@ impl Frame {
 		let binding = self.bytecode.code.clone();
 		let mut ops = binding.iter();
 		for op in ops {
-			println!("Executing Op: {:?}", op);
+			trace!("Executing Op: {:?}", op);
 			let result = self.execute_instruction(op);
 			match result {
-				Ok(ExecutionResult::Return(c)) => return Ok(None),
+				Ok(ExecutionResult::Return(())) => return Ok(None),
 				Ok(ExecutionResult::ReturnValue(val)) => return Ok(Some(val)),
 				Ok(_) => {
-					println!(
+					trace!(
 						"State:\n\tStack: [{}]\n\tLocals: [{}]\n",
 						self.stack
 							.iter()
@@ -456,60 +445,60 @@ impl Frame {
 		match op {
 			// Constants
 			Ops::aconst_null => {
-				self.stack.push(NULL);
+				self.stack.push(Value::NULL);
 				Ok(ExecutionResult::Continue)
 			}
 
 			Ops::iconst_m1 => {
-				self.stack.push(Value::Int(-1));
+				self.stack.push(Value::Primitive(Primitive::Int(-1)));
 				Ok(ExecutionResult::Continue)
 			}
 
 			Ops::iconst_0 => {
-				self.stack.push(Value::Int(0));
+				self.stack.push(Value::Primitive(Primitive::Int(0)));
 				Ok(ExecutionResult::Continue)
 			}
 
 			Ops::iconst_1 => {
-				self.stack.push(Value::Int(1));
+				self.stack.push(Value::Primitive(Primitive::Int(1)));
 				Ok(ExecutionResult::Continue)
 			}
 
 			Ops::iconst_2 => {
-				self.stack.push(Value::Int(2));
+				self.stack.push(Value::Primitive(Primitive::Int(2)));
 				Ok(ExecutionResult::Continue)
 			}
 
 			Ops::iconst_3 => {
-				self.stack.push(Value::Int(3));
+				self.stack.push(Value::Primitive(Primitive::Int(3)));
 				Ok(ExecutionResult::Continue)
 			}
 
 			Ops::iconst_4 => {
-				self.stack.push(Value::Int(4));
+				self.stack.push(4.into());
 				Ok(ExecutionResult::Continue)
 			}
 
 			Ops::iconst_5 => {
-				self.stack.push(Value::Int(5));
+				self.stack.push(5.into());
 				Ok(ExecutionResult::Continue)
 			}
 
 			Ops::bipush(byte) => {
-				self.stack.push(Value::Int(*byte as i32));
+				self.stack.push((*byte as i32).into());
 				Ok(ExecutionResult::Continue)
 			}
 			Ops::ldc(index) => {
 				let thing = self.pool.get_constant(index.to_owned() as u16)?;
-				println!("\tLoading constant: {}", thing);
+				trace!("\tLoading constant: {}", thing);
 				let resolved: Option<Value> = match thing {
 					ConstantPoolEntry::Utf8(x) => {
-						println!("{:?}", String::from_utf8(x.bytes.clone()));
+						warn!("{:?}", String::from_utf8(x.bytes.clone()));
 						warn!("Utf8 loading not yet implemented");
 						None
 					}
-					ConstantPoolEntry::Integer(x) => Some(Value::Int(x.clone())),
-					ConstantPoolEntry::Float(x) => Some(Value::Float(x.clone())),
+					ConstantPoolEntry::Integer(x) => Some(Value::from(*x)),
+					ConstantPoolEntry::Float(x) => Some(Value::from(*x)),
 					ConstantPoolEntry::Class(x) => None,
 					ConstantPoolEntry::String(x) => {
 						warn!("String loading not yet implemented");
@@ -543,10 +532,10 @@ impl Frame {
 			}
 			Ops::ldc2_w(index) => {
 				let val = self.pool.get_constant(*index)?;
-				println!("\tLoading constant: {}", val);
+				trace!("\tLoading constant: {}", val);
 				let resolved = match val {
-					ConstantPoolEntry::Double(x) => Some(Value::Double(x.clone())),
-					ConstantPoolEntry::Long(x) => Some(Value::Long(x.clone())),
+					ConstantPoolEntry::Double(x) => Some(Value::from(*x)),
+					ConstantPoolEntry::Long(x) => Some(Value::from(*x)),
 					_ => None,
 				};
 				if let Some(x) = resolved {
@@ -636,6 +625,22 @@ impl Frame {
 			}
 
 			// store
+			Ops::istore(index) => {
+				store!(self, i, *index as usize)
+			}
+			Ops::istore_0 => {
+				store!(self, i, 0)
+			}
+			Ops::istore_1 => {
+				store!(self, i, 1)
+			}
+			Ops::istore_2 => {
+				store!(self, i, 2)
+			}
+			Ops::istore_3 => {
+				store!(self, i, 3)
+			}
+
 			Ops::fstore(index) => {
 				store!(self, f, *index as usize)
 			}
@@ -651,6 +656,7 @@ impl Frame {
 			Ops::fstore_3 => {
 				store!(self, f, 3)
 			}
+
 			Ops::dstore(index) => {
 				store!(self, d, *index as usize)
 			}
@@ -663,10 +669,10 @@ impl Frame {
 			Ops::dstore_2 => {
 				store!(self, d, 2)
 			}
-
 			Ops::dstore_3 => {
 				store!(self, d, 3)
 			}
+
 			Ops::lstore(index) => {
 				store!(self, l, *index as usize)
 			}
@@ -679,9 +685,45 @@ impl Frame {
 			Ops::lstore_2 => {
 				store!(self, l, 2)
 			}
-
 			Ops::lstore_3 => {
 				store!(self, l, 3)
+			}
+
+			Ops::astore(index) => {
+				store!(self, a, *index as usize)
+			}
+			Ops::astore_0 => {
+				store!(self, a, 0)
+			}
+			Ops::astore_1 => {
+				store!(self, a, 1)
+			}
+			Ops::astore_2 => {
+				store!(self, a, 2)
+			}
+			Ops::astore_3 => {
+				store!(self, a, 3)
+			}
+			Ops::iastore => {
+				let Value::Primitive(Primitive::Int(value)) =
+					self.stack.pop().expect("value on stack")
+				else {
+					panic!("Value on stack was not int")
+				};
+				let Value::Primitive(Primitive::Int(index)) =
+					self.stack.pop().expect("value on stack")
+				else {
+					panic!("index on stack was not int")
+				};
+				let Value::Reference(Some(Reference::ArrayReference(ArrayReference::Primitive(
+					arr,
+				)))) = self.stack.pop().expect("value on stack")
+				else {
+					panic!("Reference not on stack")
+				};
+				let (id, array) = *arr.lock().unwrap();
+
+				Ok(ExecutionResult::Continue)
 			}
 
 			//Stack
@@ -698,10 +740,12 @@ impl Frame {
 			Ops::dadd => {
 				let value1 = self.stack.pop().expect("Stack must have value");
 				let value2 = self.stack.pop().expect("Stack must have value");
-				if let (Value::Double(double1), Value::Double(double2)) =
-					(value1.clone(), value2.clone())
+				if let (
+					Value::Primitive(Primitive::Double(double1)),
+					Value::Primitive(Primitive::Double(double2)),
+				) = (value1.clone(), value2.clone())
 				{
-					self.stack.push(Value::Double(double1 + double2));
+					self.stack.push(Value::from(double1 + double2));
 					Ok(ExecutionResult::Continue)
 				} else {
 					Err(VmError::StackError(format!(
@@ -710,11 +754,53 @@ impl Frame {
 				}
 			}
 
-			//Conversions
+			// Conversions
+			Ops::i2l => {
+				if let Value::Primitive(Primitive::Int(int)) =
+					self.stack.pop().expect("Stack must have value")
+				{
+					let long: i64 = int.into();
+					self.stack.push(Value::from(long));
+					Ok(ExecutionResult::Continue)
+				} else {
+					Err(VmError::StackError("Popped value was not int".to_string()))
+				}
+			}
+			Ops::i2f => {
+				todo!("int to float cast")
+			}
+			Ops::i2d => {
+				if let Value::Primitive(Primitive::Int(int)) =
+					self.stack.pop().expect("Stack must have value")
+				{
+					let double: f64 = int.into();
+					self.stack.push(Value::from(double));
+					Ok(ExecutionResult::Continue)
+				} else {
+					Err(VmError::StackError("Popped value was not int".to_string()))
+				}
+			}
+			Ops::l2i => {
+				todo!("long to int cast")
+			}
+			Ops::l2f => {
+				todo!("long to float cast")
+			}
+			Ops::l2d => {
+				todo!("long to double cast")
+			}
+			Ops::f2i => {
+				todo!("float to int cast")
+			}
+			Ops::f2l => {
+				todo!("float to long cast")
+			}
 			Ops::f2d => {
-				if let Value::Float(float) = self.stack.pop().expect("Stack must have value") {
+				if let Value::Primitive(Primitive::Float(float)) =
+					self.stack.pop().expect("Stack must have value")
+				{
 					let double: f64 = float.into();
-					self.stack.push(Value::Double(double));
+					self.stack.push(Value::from(double));
 					Ok(ExecutionResult::Continue)
 				} else {
 					Err(VmError::StackError(
@@ -722,6 +808,33 @@ impl Frame {
 					))
 				}
 			}
+			Ops::d2i => {
+				todo!("double to int cast")
+			}
+			Ops::d2l => {
+				if let Value::Primitive(Primitive::Double(double)) =
+					self.stack.pop().expect("Stack must have value")
+				{
+					let long: i64 = double as i64;
+					self.stack.push(Value::from(long));
+					Ok(ExecutionResult::Continue)
+				} else {
+					Err(VmError::StackError("Popped value was not int".to_string()))
+				}
+			}
+			Ops::d2f => {
+				todo!("double to float cast")
+			}
+			Ops::i2b => {
+				todo!("int to byte cast")
+			}
+			Ops::i2c => {
+				todo!("int to char cast")
+			}
+			Ops::i2s => {
+				todo!("int to short cast")
+			}
+
 			// Control
 			Ops::return_void => Ok(ExecutionResult::Return(())),
 
@@ -767,22 +880,31 @@ impl Frame {
 			}
 
 			Ops::getfield(index) => {
-				todo!("op getfield: index - {}", index)
+				let field_ref = self.pool.resolve_field(*index)?;
+				trace!("Getting field {field_ref:?}");
+				if let Value::Reference(object_ref) =
+					self.stack.pop().expect("object reference on stack")
+				{
+					if let Some(Reference::ObjectReference(object)) = object_ref {
+						let val = object.lock().unwrap().get_field(&field_ref.name);
+						self.stack.push(val);
+						Ok(ExecutionResult::Continue)
+					} else {
+						Err(VmError::StackError("Null pointer exception".to_string()))
+					}
+				} else {
+					Err(VmError::StackError(
+						"putfield tried to operate on a non object stack value".to_string(),
+					))
+				}
 			}
 
 			Ops::putfield(index) => {
 				let field_ref = self.pool.resolve_field(*index)?;
 				trace!("Setting field {field_ref:?}");
-				let init_class = self
-					.thread
-					.get_class(&field_ref.class)
-					.expect("pre initialised class");
-				// let static_field = init_class
-				// 	.find_field(&field_ref.name, field_ref.desc)
-				// 	.expect("TO hecken work");
 				let value = self.stack.pop().expect("value on stack");
 				if let Value::Reference(reference) = self.stack.pop().expect("object on stack") {
-					if let Some(object) = reference {
+					if let Some(Reference::ObjectReference(object)) = reference {
 						object.lock().unwrap().set_field(&field_ref.name, value);
 						Ok(ExecutionResult::Continue)
 					} else {
@@ -843,6 +965,14 @@ impl Frame {
 				Ok(ExecutionResult::Continue)
 			}
 
+			Ops::invokeinterface(_, _, _) => {
+				todo!("invokeInterface")
+			}
+
+			Ops::invokedynamic(_, _) => {
+				todo!("invokeDynamic")
+			}
+
 			// can init class
 			Ops::new(index) => {
 				let class = self.pool.resolve_class_name(*index)?;
@@ -851,11 +981,44 @@ impl Frame {
 					.thread
 					.get_or_resolve_class(&class, self.thread.clone())
 					.expect("TO hecken work");
-				let object = self.thread.gc.write().unwrap().new(init_class);
-				self.stack.push(Value::Reference(Some(object)));
+				let object = self.thread.gc.write().unwrap().new_object(init_class);
+				self.stack
+					.push(Value::Reference(Some(Reference::from(object))));
 				Ok(ExecutionResult::Continue)
-				// todo!("'New' instruction")
 			}
+
+			Ops::newarray(array_type) => {
+				let value = self.stack.pop().expect("value to have stack");
+				let Value::Primitive(Primitive::Int(count)) = value else {
+					panic!("stack item was not int")
+				};
+				let array = self.thread.gc.write().unwrap().new_primitive_array();
+				self.stack
+					.push(Value::Reference(Some(Reference::from(array))));
+				Ok(ExecutionResult::Continue)
+			}
+			Ops::anewarray(_) => {
+				todo!("anewarray")
+			}
+			Ops::arraylength => {
+				todo!("arraylength")
+			}
+			Ops::athrow => {
+				todo!("athrow")
+			}
+			Ops::checkcast(_) => {
+				todo!("checkcast")
+			}
+			Ops::instanceof(_) => {
+				todo!("instanceof")
+			}
+			Ops::monitorenter => {
+				todo!("monitorenter")
+			}
+			Ops::monitorexit => {
+				todo!("monitorexit")
+			}
+
 			_ => {
 				todo!("Unimplemented op: {:?}", op)
 			}

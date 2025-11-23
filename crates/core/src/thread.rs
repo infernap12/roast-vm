@@ -2,9 +2,10 @@ use crate::class::RuntimeClass;
 use crate::class_file::{ClassFile, MethodData, MethodRef};
 use crate::class_loader::{ClassLoader, LoaderRef};
 use crate::jni::create_jni_function_table;
-use crate::object_manager::ObjectManager;
+use crate::objects::object_manager::ObjectManager;
+use crate::value::{Primitive, Value};
 use crate::vm::Vm;
-use crate::{BaseType, FieldType, Frame, MethodDescriptor, Value, VmError};
+use crate::{BaseType, FieldType, Frame, MethodDescriptor, VmError};
 use deku::DekuError::Incomplete;
 use jni::sys::{jboolean, jbyte, jchar, jdouble, jfloat, jint, jlong, jobject, jshort};
 use jni::JNIEnv;
@@ -255,35 +256,35 @@ impl VmThread {
 				}
 				Some(FieldType::Base(BaseType::Long)) => {
 					let v = cif.call::<jlong>(cp, built_args.as_ref());
-					Ok(Some(Value::Long(v)))
+					Ok(Some(Value::Primitive(Primitive::Long(v))))
 				}
 				Some(FieldType::Base(BaseType::Int)) => {
 					let v = cif.call::<jint>(cp, built_args.as_ref());
-					Ok(Some(Value::Int(v)))
+					Ok(Some(v.into()))
 				}
 				Some(FieldType::Base(BaseType::Float)) => {
 					let v = cif.call::<jfloat>(cp, built_args.as_ref());
-					Ok(Some(Value::Float(v)))
+					Ok(Some(v.into()))
 				}
 				Some(FieldType::Base(BaseType::Double)) => {
 					let v = cif.call::<jdouble>(cp, built_args.as_ref());
-					Ok(Some(Value::Double(v)))
+					Ok(Some(v.into()))
 				}
 				Some(FieldType::Base(BaseType::Boolean)) => {
 					let v = cif.call::<jboolean>(cp, built_args.as_ref());
-					Ok(Some(Value::Int(v as i32)))
+					Ok(Some(v.into()))
 				}
 				Some(FieldType::Base(BaseType::Byte)) => {
 					let v = cif.call::<jbyte>(cp, built_args.as_ref());
-					Ok(Some(Value::Byte(v)))
+					Ok(Some(v.into()))
 				}
 				Some(FieldType::Base(BaseType::Char)) => {
 					let v = cif.call::<jchar>(cp, built_args.as_ref());
-					Ok(Some(Value::Char(v)))
+					Ok(Some(v.into()))
 				}
 				Some(FieldType::Base(BaseType::Short)) => {
 					let v = cif.call::<jshort>(cp, built_args.as_ref());
-					Ok(Some(Value::Short(v)))
+					Ok(Some(v.into()))
 				}
 				Some(FieldType::ClassType(_)) | Some(FieldType::ArrayType(_)) => {
 					let v = cif.call::<jobject>(cp, built_args.as_ref());
@@ -304,14 +305,14 @@ fn build_args<'a>(params: Vec<Value>, storage: &'a mut Vec<Box<dyn Any>>) -> Vec
 
 	for value in params {
 		match value {
-			Value::Int(x) => storage.push(Box::new(x) as Box<dyn Any>),
-			Value::Boolean(x) => storage.push(Box::new(x) as Box<dyn Any>),
-			Value::Char(x) => storage.push(Box::new(x) as Box<dyn Any>),
-			Value::Float(x) => storage.push(Box::new(x) as Box<dyn Any>),
-			Value::Double(x) => storage.push(Box::new(x) as Box<dyn Any>),
-			Value::Byte(x) => storage.push(Box::new(x) as Box<dyn Any>),
-			Value::Short(x) => storage.push(Box::new(x) as Box<dyn Any>),
-			Value::Long(x) => storage.push(Box::new(x) as Box<dyn Any>),
+			Value::Primitive(Primitive::Int(x)) => storage.push(Box::new(x) as Box<dyn Any>),
+			Value::Primitive(Primitive::Boolean(x)) => storage.push(Box::new(x) as Box<dyn Any>),
+			Value::Primitive(Primitive::Char(x)) => storage.push(Box::new(x) as Box<dyn Any>),
+			Value::Primitive(Primitive::Float(x)) => storage.push(Box::new(x) as Box<dyn Any>),
+			Value::Primitive(Primitive::Double(x)) => storage.push(Box::new(x) as Box<dyn Any>),
+			Value::Primitive(Primitive::Byte(x)) => storage.push(Box::new(x) as Box<dyn Any>),
+			Value::Primitive(Primitive::Short(x)) => storage.push(Box::new(x) as Box<dyn Any>),
+			Value::Primitive(Primitive::Long(x)) => storage.push(Box::new(x) as Box<dyn Any>),
 			Value::Reference(x) => storage.push(Box::new(x) as Box<dyn Any>),
 		}
 	}
