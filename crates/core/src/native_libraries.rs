@@ -1,9 +1,9 @@
 use crate::class_file::ConstantPoolEntry;
 use dashmap::DashMap;
-use libloading::os::windows::Library;
+
+use libloading::Library;
 use std::collections::HashMap;
 
-pub type NativeLibraries = HashMap<String, Library>;
 // impl NativeExt for NativeLibraries {}
 //
 // trait NativeExt: AsRef<[..]> {

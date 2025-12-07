@@ -5,7 +5,8 @@ use crate::class_file::{
 };
 use crate::{FieldType, MethodDescriptor, VmError};
 use log::trace;
-use std::sync::{Arc, Mutex};
+use std::hash::{Hash, Hasher};
+use std::sync::{Arc, Mutex, OnceLock, OnceState};
 use std::thread::ThreadId;
 
 /// JVM Spec 5.5: Initialization states for a class
@@ -30,9 +31,26 @@ pub struct RuntimeClass {
 	pub interfaces: Vec<Arc<RuntimeClass>>,
 	pub fields: Vec<FieldData>,
 	pub methods: Vec<MethodData>,
+	pub mirror: OnceLock<u32>,
 	/// Thread-safe initialization state (JVM Spec 5.5)
 	pub init_state: Mutex<InitState>,
+	pub super_classes: Vec<Arc<RuntimeClass>>,
+	pub super_interfaces: Vec<Arc<RuntimeClass>>,
+	pub component_type: Option<Arc<RuntimeClass>>,
 }
+impl Hash for RuntimeClass {
+	fn hash<H: Hasher>(&self, state: &mut H) {
+		self.this_class.hash(state)
+	}
+}
+
+impl PartialEq<Self> for RuntimeClass {
+	fn eq(&self, other: &Self) -> bool {
+		self.this_class.eq(&other.this_class)
+	}
+}
+
+impl Eq for RuntimeClass {}
 
 impl RuntimeClass {
 	pub fn find_method(&self, name: &str, desc: &MethodDescriptor) -> Result<&MethodData, VmError> {
@@ -58,15 +76,16 @@ impl RuntimeClass {
 		Err(VmError::LoaderError("Failed to find method".to_string()))
 	}
 
-	pub fn find_field(&self, name: &str, desc: FieldType) -> Result<&FieldData, VmError> {
-		println!("Finding field");
+	pub fn find_field(&self, name: &str, desc: &FieldType) -> Result<&FieldData, VmError> {
+		trace!("Finding field");
 		if let Some(field) = self.fields.iter().find(|e| {
-			println!("Field Name Needed: {name}, Checked:{}", e.name);
-			println!("Field type Needed: {desc:?}, Checked:{:?}", e.desc);
+			trace!("Field Name Needed: {name}, Checked:{}", e.name);
+			trace!("Field type Needed: {desc:?}, Checked:{:?}", e.desc);
 			let name_match = e.name.eq(name);
-			let type_match = desc == e.desc;
+			let type_match = *desc == e.desc;
 			name_match && type_match
 		}) {
+			trace!("Found field: {name}");
 			return Ok(field);
 		};
 
@@ -76,5 +95,11 @@ impl RuntimeClass {
 		}
 		// No field found, and we must be Object, as we don't have a superclass
 		Err(VmError::LoaderError("Failed to find field".to_string()))
+	}
+
+	pub fn is_assignable_into(&self, into: Arc<RuntimeClass>) -> bool {
+		self.eq(&*into)
+			|| self.super_classes.contains(&into)
+			|| self.super_interfaces.contains(&into)
 	}
 }

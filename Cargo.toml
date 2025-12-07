@@ -15,3 +15,5 @@ dashmap = "7.0.0-rc2"
 libloading = "0.8.9"
 libffi = "5.0.0"
 jni = "0.21.1"
+roast-vm-sys = { path = "crates/roast-vm-sys", version = "0.1.0" }
+roast-vm-core = { path = "crates/core", version = "0.1.0" }

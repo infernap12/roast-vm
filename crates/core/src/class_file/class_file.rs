@@ -490,12 +490,42 @@ pub fn pool_get_string(constant_pool: &[ConstantPoolEntry], index: u16) -> Optio
 	None
 }
 
+fn read_bytecode_with_offsets<R: deku::no_std_io::Read + deku::no_std_io::Seek>(
+	bytes: u32,
+	reader: &mut deku::reader::Reader<R>,
+	endian: deku::ctx::Endian,
+) -> Result<Vec<(u16, Ops)>, DekuError> {
+	use deku::DekuReader;
+
+	let mut code = Vec::new();
+	let mut byte_offset = 0u16;
+	let total_bytes = bytes as usize;
+	let mut bytes_read = 0;
+
+	// Parse until we've consumed all the bytecode
+	while bytes_read < total_bytes {
+		let start_pos = reader.bits_read;
+
+		// Parse the next Op
+		let op = Ops::from_reader_with_ctx(reader, endian)?;
+
+		let end_pos = reader.bits_read;
+		let op_bytes = ((end_pos - start_pos) / 8) as usize;
+
+		code.push((byte_offset, op));
+		byte_offset += op_bytes as u16;
+		bytes_read += op_bytes;
+	}
+
+	Ok(code)
+}
+
 #[derive(Clone, PartialEq, Debug, DekuRead)]
 #[deku(endian = "Big")]
 pub(crate) struct Bytecode {
 	bytes: u32,
-	#[deku(bytes_read = "bytes")]
-	pub code: Vec<Ops>,
+	#[deku(reader = "read_bytecode_with_offsets(*bytes, deku::reader, deku::ctx::Endian::Big)")]
+	pub code: Vec<(u16, Ops)>,
 }
 
 // pub trait ConstantPoolExt {
@@ -615,7 +645,7 @@ pub(crate) struct Bytecode {
 // 	}
 // }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct MethodRef {
 	pub class: String,
 	pub name: String,
@@ -673,7 +703,7 @@ impl From<Constant> for Value {
 }
 
 #[allow(non_snake_case)]
-#[derive(Debug, PartialEq, DekuRead, DekuWrite)]
+#[derive(Debug, Clone, Copy, PartialEq, DekuRead, DekuWrite)]
 pub struct ClassFlags {
 	// flags
 	#[deku(bits = 1)]

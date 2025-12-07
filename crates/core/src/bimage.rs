@@ -1,5 +1,6 @@
+use log::trace;
 use sevenz_rust2::ArchiveReader;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 
 const DEFAULT_LOCATION: &str = "./lib/modules";
@@ -7,6 +8,9 @@ const DEFAULT_LOCATION: &str = "./lib/modules";
 pub struct Bimage {
 	image: ArchiveReader<File>,
 	modules: Vec<String>,
+	// inversion, <Package, Module>
+	// eg. <java.lang, java.base>
+	packages: HashMap<String, String>,
 }
 
 impl Default for Bimage {
@@ -24,9 +28,27 @@ impl Default for Bimage {
 			.into_iter()
 			.collect::<Vec<_>>();
 		modules.sort();
+
+		/*let packages = reader
+		.archive()
+		.files
+		.iter()
+		.filter(|e| !e.is_directory)
+		.map(|e| {
+			if e.name.contains("java.base") {
+				println!("{:?}", e);
+			}
+
+			("Greg".to_owned(), "Dave".to_owned())
+		})
+		.collect::<HashMap<_, _>>();*/
+
+		let packages = HashMap::new();
+
 		Self {
 			image: reader,
 			modules,
+			packages,
 		}
 	}
 }
@@ -58,6 +80,8 @@ impl Bimage {
 	}
 
 	pub fn get_class(&mut self, module: &str, class: &str) -> Option<Vec<u8>> {
+		// trace!("Modules{:#?}", self.modules);
+
 		let path = Self::resolve_path(module, class);
 		self.image
 			.read_file(&path)

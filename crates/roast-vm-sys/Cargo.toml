@@ -1,12 +1,13 @@
 [package]
-name = "jvm-rs-sys"
+name = "roast-vm-sys"
 version = "0.1.0"
 edition = "2024"
 publish = ["nexus"]
 
 [dependencies]
 jni = { workspace = true }
+roast-vm-core = { workspace = true }
 
 [lib]
-name = "jvm_rs"
+name = "roast_vm"
 crate-type = ["cdylib"]

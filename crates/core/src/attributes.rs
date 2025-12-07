@@ -130,10 +130,7 @@ impl AttributeInfo {
 
 	/// Get the interpreted attribute, parsing if necessary
 	pub fn get(&self, class_file: &ClassFile) -> Option<Attribute> {
-		class_file
-			.constant_pool
-			.parse_attribute(self.deref().clone())
-			.ok()
+		class_file.constant_pool.parse_attribute(self.clone()).ok()
 
 		// if let Some(ref attr) = self.interpreted {
 		// 	Some(attr.clone())
