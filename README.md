@@ -1,10 +1,10 @@
-# roast-vm
+# RoastVM
 
 A Java Virtual Machine (JVM) implementation written in Rust, capable of parsing and executing Java class files and bytecode.
 
 ## Overview
 
-roast-vm is an educational/experimental JVM implementation that demonstrates the core components and execution model of the Java Virtual Machine. The project uses Rust's type safety and modern tooling to build a simplified but functional JVM interpreter.
+RoastVM is an educational/experimental JVM implementation that demonstrates the core components and execution model of the Java Virtual Machine. The project uses Rust's type safety and modern tooling to build a simplified but functional JVM interpreter.
 
 ## Features
 
