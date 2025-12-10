@@ -3,6 +3,7 @@
 mod class;
 mod object;
 mod misc_unsafe;
+mod system;
 
 use jni::objects::{JClass, JObject, JString};
 use jni::strings::JNIString;
@@ -11,6 +12,7 @@ use jni::{JNIEnv, NativeMethod};
 use std::ffi::c_void;
 use std::io::Write;
 use std::time::{SystemTime, UNIX_EPOCH};
+use roast_vm_core::objects::array::ArrayReference;
 use roast_vm_core::objects::object::ObjectReference;
 use roast_vm_core::objects::ReferenceKind;
 use roast_vm_core::VmThread;
@@ -159,6 +161,14 @@ fn resolve_object(thread: &VmThread, obj: jobject) -> Option<ObjectReference> {
 		return None;
 	};
 	Some(obj_ref.clone())
+}
+
+fn resolve_array(thread: &VmThread, obj: jobject) -> Option<ArrayReference> {
+	let gc = thread.gc.read().unwrap();
+	let ReferenceKind::ArrayReference(arr_ref) = gc.get(obj as u32) else {
+		return None;
+	};
+	Some(arr_ref.clone())
 }
 
 #[unsafe(no_mangle)]

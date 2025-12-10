@@ -1,4 +1,4 @@
-use crate::attributes::{Attribute, AttributeInfo, CodeAttribute};
+use crate::attributes::{Attribute, AttributeInfo, CodeAttribute, LineNumberTableEntry};
 use crate::class_file::constant_pool::{ConstantPoolError, ConstantPoolExt, ConstantPoolOwned};
 use crate::instructions::Ops;
 use crate::value::Value;
@@ -657,6 +657,7 @@ pub struct MethodData {
 	pub desc: MethodDescriptor,
 	pub code: Option<CodeAttribute>,
 	pub flags: MethodFlags,
+	pub line_number_table: Option<Vec<LineNumberTableEntry>>,
 	// pub exceptions: Option<_>,
 	// pub visible_annotations: Option<_>,
 	// pub invisible_annotations: Option<_>,

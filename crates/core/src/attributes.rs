@@ -3,7 +3,7 @@ use crate::class_file::{ClassFile, Constant, ConstantPoolEntry};
 use deku::DekuContainerRead;
 use deku_derive::DekuRead;
 use log::trace;
-use std::fmt::Display;
+use std::fmt::{Display, Formatter};
 use std::ops::Deref;
 
 #[derive(Clone, PartialEq, Debug, DekuRead)]
@@ -58,6 +58,22 @@ pub enum ArrayType {
 	T_INT,
 	#[deku(id = "11")]
 	T_LONG,
+}
+
+impl Display for ArrayType {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		let str = match self {
+			ArrayType::T_BOOLEAN => "[Z",
+			ArrayType::T_CHAR => "[C",
+			ArrayType::T_FLOAT => "[F",
+			ArrayType::T_DOUBLE => "[D",
+			ArrayType::T_BYTE => "[B",
+			ArrayType::T_SHORT => "[S",
+			ArrayType::T_INT => "[I",
+			ArrayType::T_LONG => "[J",
+		};
+		write!(f, "{}", str)
+	}
 }
 
 // impl TryFrom<u8> for Ops {

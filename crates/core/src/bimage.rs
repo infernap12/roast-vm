@@ -79,7 +79,7 @@ impl Bimage {
 		slashes.replace("/", ".")
 	}
 
-	pub fn get_class(&mut self, module: &str, class: &str) -> Option<Vec<u8>> {
+	pub fn get_class(&mut self, module: &str, class: &str) -> Result<Vec<u8>, String> {
 		// trace!("Modules{:#?}", self.modules);
 
 		let path = Self::resolve_path(module, class);
@@ -87,7 +87,7 @@ impl Bimage {
 			.read_file(&path)
 			.map_err(|e| {
 				log::trace!("Class not found {}", path);
+				e.to_string()
 			})
-			.ok()
 	}
 }

@@ -6,7 +6,7 @@ use crate::objects::object::{ObjectReference, ReferenceKind};
 use crate::objects::object_manager::ObjectManager;
 use crate::value::{Primitive, Value};
 use crate::vm::Vm;
-use crate::{BaseType, FieldType, Frame, MethodDescriptor, ThreadId, VmError};
+use crate::{BaseType, FieldType, Frame, MethodDescriptor, ThreadId};
 use deku::DekuError::Incomplete;
 use itertools::Itertools;
 use jni::sys::{jboolean, jbyte, jchar, jdouble, jfloat, jint, jlong, jobject, jshort, JNIEnv};
@@ -21,6 +21,7 @@ use std::ptr::null_mut;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::vec::IntoIter;
+use crate::error::VmError;
 
 type MethodCallResult = Result<Option<Value>, VmError>;
 
@@ -36,7 +37,7 @@ pub struct VmThread {
 	pub id: ThreadId,
 	pub vm: Arc<Vm>,
 	pub loader: Arc<Mutex<ClassLoader>>,
-	pub frame_stack: Vec<Frame>,
+	pub frame_stack: Mutex<Vec<Arc<Mutex<Frame>>>>,
 	pub gc: Arc<RwLock<ObjectManager>>,
 	pub jni_env: JNIEnv,
 }
@@ -54,7 +55,7 @@ impl VmThread {
 				id,
 				vm,
 				loader,
-				frame_stack: Vec::new(),
+				frame_stack: Default::default(),
 				gc,
 				jni_env,
 			}
@@ -87,8 +88,7 @@ impl VmThread {
 			.loader
 			.lock()
 			.unwrap()
-			.get_or_load(what, None)
-			.map_err(VmError::LoaderError)?;
+			.get_or_load(what, None)?;
 
 		// Phase 2: Collect classes that need initialisation (short lock)
 		let classes_to_init = {
@@ -111,7 +111,6 @@ impl VmThread {
 			.lock()
 			.unwrap()
 			.get_or_load(what, None)
-			.map_err(VmError::LoaderError)
 	}
 
 	/// Initialize a class following JVM Spec 5.5.
@@ -178,23 +177,8 @@ impl VmThread {
 			}
 
 			// Run <clinit> if present
-			let class_init_method = class.find_method("<clinit>", &MethodDescriptor::void());
-			if let Ok(method) = class_init_method {
-				let method_ref = MethodRef {
-					class: class.this_class.clone(),
-					name: method.name.clone(),
-					desc: method.desc.clone(),
-				};
-
-				Frame::new(
-					method_ref,
-					method.code.clone().unwrap(),
-					class.constant_pool.clone(),
-					vec![],
-					self.vm.clone(),
-				)
-				.execute()
-				.map_err(|e| VmError::LoaderError(format!("Error in <clinit>: {:?}", e)))?;
+			if let Ok(method) = class.find_method("<clinit>", &MethodDescriptor::void()) {
+				self.execute_method(&class, &method, vec![])?;
 			}
 			Ok(())
 		})();
@@ -216,18 +200,32 @@ impl VmThread {
 		result
 	}
 
-	pub fn invoke_main(&self, what: &str) {
+	pub fn invoke_main(&self, what: &str) -> Result<(), VmError> {
 		let method_ref = MethodRef {
 			class: what.to_string(),
 			name: "main".to_string(),
 			desc: MethodDescriptor::psvm(),
 		};
 
-		self.invoke(method_ref, Vec::new())
-			.expect("Main method died");
+		self.invoke(method_ref, Vec::new())?;
+		Ok(())
 	}
 
-	pub fn invoke(&self, method_reference: MethodRef, mut args: Vec<Value>) -> MethodCallResult {
+	pub fn invoke(&self, method_reference: MethodRef, args: Vec<Value>) -> MethodCallResult {
+		if method_reference.class.contains("Unsafe") {
+			println!("()")
+		}
+		let class = self.get_or_resolve_class(&method_reference.class)?;
+		let method = class.find_method(&method_reference.name, &method_reference.desc).unwrap();
+		self.execute_method(&class, &method, args)
+	}
+
+	pub fn invoke_virtual(&self, method_reference: MethodRef, class: Arc<RuntimeClass>, args: Vec<Value>) -> MethodCallResult {
+		let method = class.find_method(&method_reference.name, &method_reference.desc).unwrap();
+		self.execute_method(&class, &method, args)
+	}
+
+	/*pub fn invoke_old(&self, method_reference: MethodRef, mut args: Vec<Value>) -> MethodCallResult {
 		let mut new_args = Vec::new();
 		let class = self.get_or_resolve_class(&method_reference.class)?;
 		let resolved_method = class
@@ -255,8 +253,11 @@ impl VmThread {
 			args,
 			self.vm.clone(),
 		);
-		frame.execute()
-	}
+		self.frame_stack.lock().unwrap().push(frame.clone());
+		let result = frame.execute()?;
+		self.frame_stack.lock().unwrap().pop();
+		Ok(result)
+	}*/
 
 	pub fn invoke_native(&self, method: &MethodRef, mut args: Vec<Value>) -> MethodCallResult {
 		let symbol_name = generate_jni_method_name(method, false);
@@ -275,7 +276,7 @@ impl VmThread {
 					let name_with_params = generate_jni_method_name(method, true);
 					self.vm.find_native_method(&name_with_params)
 				})
-				.ok_or(VmError::NativeError("Link error".to_owned()))?;
+				.ok_or(VmError::NativeError(format!("Link error: Unable to locate symbol {symbol_name}")))?;
 			// build pointer to native fn
 			let cp = CodePtr::from_ptr(p);
 
@@ -350,6 +351,70 @@ impl VmThread {
 		};
 		warn!("Invoke native not final");
 		result
+	}
+	fn execute_method(
+		&self,
+		class: &Arc<RuntimeClass>,
+		method: &MethodData,
+		args: Vec<Value>,
+	) -> MethodCallResult {
+		eprintln!("[DEBUG] execute_method self.id = {:?}", self.id);
+		let method_ref = MethodRef {
+			class: class.this_class.clone(),
+			name: method.name.clone(),
+			desc: method.desc.clone(),
+		};
+
+
+		if method.flags.ACC_NATIVE {
+			let mut native_args = Vec::new();
+			if method.flags.ACC_STATIC {
+				let jclass = self.vm.gc.read().unwrap().get(*class.mirror.wait());
+				native_args.push(Value::Reference(Some(jclass)));
+			}
+			native_args.extend(args);
+			return self.invoke_native(&method_ref, native_args);
+		}
+
+		let mut frame = Frame::new(
+			class.clone(),
+			method_ref,
+			method.code.clone().unwrap(),
+			class.constant_pool.clone(),
+			args,
+			self.vm.clone(),
+			method.line_number_table.clone(),
+		);
+		let frame = Arc::new(Mutex::new(frame));
+		self.frame_stack.lock().unwrap().push(frame.clone());
+		eprintln!("[DEBUG] pushed frame for {}.{}, stack depth now: {}",
+				  class.this_class, method.name,
+				  self.frame_stack.lock().unwrap().len());
+		let result = frame.lock().unwrap().execute();
+		eprintln!("[DEBUG] returned from {}.{}, result ok: {}, stack depth: {}",
+				  class.this_class, method.name, result.is_ok(),
+				  self.frame_stack.lock().unwrap().len());
+		if result.is_ok() {
+			self.frame_stack.lock().unwrap().pop();
+		}
+		result
+	}
+	pub fn print_stack_trace(&self) {
+		let guard = self.frame_stack.lock().unwrap();
+		// Reverse - most recent frame first (like Java does)
+		for frame in guard.iter().rev() {
+			let frame = frame.lock().unwrap();
+			let method = &frame.method_ref;
+			// Internal format uses '/', Java stack traces use '.'
+			let class_name = method.class.replace("/", ".");
+
+
+			match (&frame.class.source_file, &frame.current_line_number()) {
+				(Some(file), Some(line)) => eprintln!("\tat {}.{}({}:{})", class_name, method.name, file, line),
+				(Some(file), None) => eprintln!("\tat {}.{}({})", class_name, method.name, file),
+				_ => eprintln!("\tat {}.{}(Unknown Source)", class_name, method.name),
+			}
+		}
 	}
 }
 
@@ -478,6 +543,7 @@ impl VmThread {
 		}
 
 		let string_class = self.get_class("java/lang/String").unwrap();
-		gc.new_string(string_class, utf)
+		let byte_array_class = self.get_class("[B").unwrap();
+		gc.new_string(byte_array_class, string_class, utf)
 	}
 }

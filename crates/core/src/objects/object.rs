@@ -110,6 +110,12 @@ impl ReferenceKind {
 			Self::ArrayReference(a) => a.id(),
 		}
 	}
+	pub fn class(&self) -> Arc<RuntimeClass> {
+		match self {
+			Self::ObjectReference(r) => r.lock().unwrap().class.clone(),
+			Self::ArrayReference(a) => a.class(),
+		}
+	}
 }
 
 pub type Reference = Option<ReferenceKind>;

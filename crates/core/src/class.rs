@@ -3,11 +3,12 @@ use crate::class_file::{
 	ClassFile, ClassFlags, ConstantPoolEntry, FieldData, FieldInfo, FieldRef, MethodData,
 	MethodInfo, MethodRef,
 };
-use crate::{FieldType, MethodDescriptor, VmError};
+use crate::{FieldType, MethodDescriptor};
 use log::trace;
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex, OnceLock, OnceState};
 use std::thread::ThreadId;
+use crate::error::VmError;
 
 /// JVM Spec 5.5: Initialization states for a class
 #[derive(Debug, Clone, PartialEq)]
@@ -37,6 +38,7 @@ pub struct RuntimeClass {
 	pub super_classes: Vec<Arc<RuntimeClass>>,
 	pub super_interfaces: Vec<Arc<RuntimeClass>>,
 	pub component_type: Option<Arc<RuntimeClass>>,
+	pub source_file: Option<String>,
 }
 impl Hash for RuntimeClass {
 	fn hash<H: Hasher>(&self, state: &mut H) {
@@ -98,8 +100,23 @@ impl RuntimeClass {
 	}
 
 	pub fn is_assignable_into(&self, into: Arc<RuntimeClass>) -> bool {
-		self.eq(&*into)
-			|| self.super_classes.contains(&into)
-			|| self.super_interfaces.contains(&into)
+		if self.eq(&*into) || self.super_classes.contains(&into) || self.super_interfaces.contains(&into) {
+			return true;
+		}
+		// Array covariance: both must be arrays, then check component types
+		if let (Some(self_comp), Some(into_comp)) = (&self.component_type, &into.component_type) {
+			// Primitive components must match exactly
+			if self_comp.is_primitive_class() {
+				return self_comp.eq(&*into_comp);
+			}
+			// Reference components: recursive covariance
+			return self_comp.is_assignable_into(into_comp.clone());
+		}
+
+		false
+	}
+
+	fn is_primitive_class(&self) -> bool {
+		matches!(self.this_class.as_str(), "byte"|"char"|"double"|"float"|"int"|"long"|"short"|"boolean")
 	}
 }

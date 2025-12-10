@@ -12,6 +12,7 @@ use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
+use crate::error::VmError;
 
 pub type LoaderRef = Arc<Mutex<ClassLoader>>;
 
@@ -141,7 +142,7 @@ impl ClassLoader {
 		&mut self,
 		class_name: &str,
 		loader: LoaderId,
-	) -> Result<Arc<RuntimeClass>, String> {
+	) -> Result<Arc<RuntimeClass>, VmError> {
 		if let Some(class) = self.classes.get(&(class_name.to_string(), loader)) {
 			return Ok(class.clone());
 		}
@@ -164,14 +165,15 @@ impl ClassLoader {
 						.expect("invalid L descriptor");
 					self.get_or_load(class_name, None)
 				}
-				None => Err("empty component descriptor".to_string()),
-				_ => Err(format!("invalid component descriptor: {}", component_name)),
-			};
-			let component = self.get_or_load(component_name, None)?;
+				None => Err(VmError::LoaderError("empty component descriptor".to_string())),
+				_ => Err(VmError::LoaderError(format!("invalid component descriptor: {}", component_name))),
+			}?;
+			// let component = self.get_or_load(component_name, None)?;
 			let arr_class = self.create_array_class(
 				component,
 			);
-			return Ok(Arc::new(arr_class))
+			self.needs_init.push(arr_class.clone());
+			return Ok(arr_class)
 		}
 		let class = self.load_class(class_name, loader)?;
 		self.needs_init.push(class.clone());
@@ -182,14 +184,19 @@ impl ClassLoader {
 		self.classes.clone()
 	}*/
 
-	fn load_class(&mut self, what: &str, loader: LoaderId) -> Result<Arc<RuntimeClass>, String> {
+	fn load_class(&mut self, what: &str, loader: LoaderId) -> Result<Arc<RuntimeClass>, VmError> {
 		let (module, class_fqn) = ("", what);
 		let bytes = self
 			.bimage
-			.get_class(module, class_fqn)
-			.unwrap_or_else(|| Self::load_class_from_disk(what));
+			.get_class(module, class_fqn).or_else(|e| Self::load_class_from_disk(what)).map_err(|e1| {
+			let classes = self.classes.iter().map(|x| {
+				x.this_class.clone()
+			}).collect::<Vec<_>>();
+			// println!("{:#?}", classes);
+			VmError::LoaderError(format!("failed to find class: {:?}\n{:#?}", what, classes))
+		})?;
 		let (_, cf) = ClassFile::from_bytes((bytes.as_ref(), 0))
-			.map_err(|e| format!("failed to parse class file: {}", e))?;
+			.map_err(|e| VmError::DekuError(e))?;
 		let runtime = self.runtime_class(cf);
 		let arced = Arc::new(runtime);
 		let option = self
@@ -201,7 +208,7 @@ impl ClassLoader {
 		Ok(arced)
 	}
 
-	fn load_class_from_disk(what: &str) -> Vec<u8> {
+	fn load_class_from_disk(what: &str) -> Result<Vec<u8>, String> {
 		let class_path = std::env::args()
 			.nth(1)
 			.unwrap_or("./data".to_string())
@@ -209,10 +216,10 @@ impl ClassLoader {
 
 		let path = format!("{class_path}/{what}.class");
 		log::info!("Loading class from path: {}", path);
-		let mut class_file = File::open(path).unwrap();
+		let mut class_file = File::open(path).map_err(|e| {e.to_string()})?;
 		let mut bytes = Vec::new();
 		class_file.read_to_end(&mut bytes).unwrap();
-		bytes
+		Ok(bytes)
 	}
 
 	fn runtime_class(&mut self, class_file: ClassFile) -> RuntimeClass {
@@ -309,11 +316,21 @@ impl ClassLoader {
 						None
 					}
 				});
+				let line_number_table = code.as_ref().and_then(|x| {
+					x.attributes.iter().find_map(|attr| {
+						match constant_pool.parse_attribute(attr.clone()).ok()? {
+							Attribute::LineNumberTable(table) => Some(table.line_number_table),
+							_ => None,
+						}
+					})
+				});
+
 				MethodData {
 					name,
 					flags,
 					desc,
 					code,
+					line_number_table,
 				}
 			})
 			.collect::<Vec<_>>();
@@ -339,26 +356,16 @@ impl ClassLoader {
 			.cloned()
 			.filter(|e| e.access_flags.INTERFACE)
 			.collect::<Vec<_>>();
-		// if super_classes.len() > 1 {
-		// 	println!("Jobs Done");
-		// }
-		// if super_interfaces.len() > interfaces.len() {
-		// 	let mut super_names = super_interfaces
-		// 		.iter()
-		// 		.cloned()
-		// 		.map(|e| e.this_class.clone())
-		// 		.collect::<Vec<_>>();
-		// 	super_names.sort();
-		// 	println!("sif: {:#?}", super_names);
-		// 	let mut names = interfaces
-		// 		.iter()
-		// 		.cloned()
-		// 		.map(|e| e.this_class.clone())
-		// 		.collect::<Vec<_>>();
-		// 	names.sort();
-		// 	println!("if: {:#?}", names);
-		// 	println!("Ready to work");
-		// }
+
+		let source_file = class_file.attributes.iter().find_map(|attr| {
+			match constant_pool.parse_attribute(attr.clone()).ok()? {
+				Attribute::SourceFile(index) => {
+					constant_pool.get_string(index).ok()
+				},
+				_ => None,
+			}
+		});
+
 		RuntimeClass {
 			constant_pool,
 			access_flags,
@@ -372,6 +379,7 @@ impl ClassLoader {
 			super_classes,
 			super_interfaces,
 			component_type: None,
+			source_file,
 		}
 	}
 	// pub fn get_or_create_array_class(class_name: &str) -> RuntimeClass {
@@ -386,35 +394,52 @@ impl ClassLoader {
 	pub fn create_array_class(
 		&mut self,
 		component: Arc<RuntimeClass>,
-	) -> RuntimeClass {
+	) -> Arc<RuntimeClass> {
 		// let name = format!("[{}", component.descriptor()); // e.g., "[Ljava/lang/String;"
-		let object_class: Arc<RuntimeClass> = self.get_or_load("/java/lang/Object", None).unwrap();
-		let cloneable: Arc<RuntimeClass> = self.get_or_load("/java/lang/Cloneable", None).unwrap();
-		let serializable: Arc<RuntimeClass> = self.get_or_load("/java/io/Serializable", None).unwrap();
-		RuntimeClass {
-			constant_pool: Arc::new(vec![]),
-			access_flags: ClassFlags {
-				MODULE: false,
-				ENUM: false,
-				ANNOTATION: false,
-				SYNTHETIC: false,
-				ABSTRACT: true,
-				INTERFACE: false,
-				SUPER: false,
-				FINAL: true,
-				PUBLIC: true,
-			},
-			this_class: "name".to_string(),
-			super_class: Some(object_class.clone()),
-			interfaces: vec![cloneable.clone(), serializable.clone()],
-			fields: vec![],
-			methods: vec![],  // clone() is handled specially
-			mirror: OnceLock::new(),
-			init_state: Mutex::new(InitState::Initialized), // arrays need no <clinit>
-			super_classes: vec![object_class],
-			super_interfaces: vec![cloneable, serializable],
-			component_type: Some(component),  // new field
-		}
+		let object_class: Arc<RuntimeClass> = self.get_or_load("java/lang/Object", None).unwrap();
+		let cloneable: Arc<RuntimeClass> = self.get_or_load("java/lang/Cloneable", None).unwrap();
+		let serializable: Arc<RuntimeClass> = self.get_or_load("java/io/Serializable", None).unwrap();
+		let name = match component.this_class.as_str() {
+			"byte" => "[B".to_string(),
+			"char" => "[C".to_string(),
+			"double" => "[D".to_string(),
+			"float" => "[F".to_string(),
+			"int" => "[I".to_string(),
+			"long" => "[J".to_string(),
+			"short" => "[S".to_string(),
+			"boolean" => "[Z".to_string(),
+			s if s.starts_with('[') => format!("[{}", s),      // nested array
+			s => format!("[L{};", s),                          // object class
+		};
+		let klass =
+			RuntimeClass {
+				constant_pool: Arc::new(vec![]),
+				access_flags: ClassFlags {
+					MODULE: false,
+					ENUM: false,
+					ANNOTATION: false,
+					SYNTHETIC: false,
+					ABSTRACT: true,
+					INTERFACE: false,
+					SUPER: false,
+					FINAL: true,
+					PUBLIC: true,
+				},
+				this_class: name.clone(),
+				super_class: Some(object_class.clone()),
+				interfaces: vec![cloneable.clone(), serializable.clone()],
+				fields: vec![],
+				methods: vec![],  // clone() is handled specially
+				mirror: OnceLock::new(),
+				init_state: Mutex::new(InitState::NotInitialized), // arrays need no <clinit>
+				super_classes: vec![object_class],
+				super_interfaces: vec![cloneable, serializable],
+				component_type: Some(component),  // new field
+				source_file: None,
+			};
+		let klass = Arc::new(klass);
+		self.classes.insert((name.to_string(), None), klass.clone());
+		klass
 	}
 
 	pub fn primitive_class(&mut self, name: &str) -> Arc<RuntimeClass> {
@@ -449,6 +474,7 @@ impl ClassLoader {
 			super_classes: vec![],
 			super_interfaces: vec![],
 			component_type: None,
+			source_file: None,
 		});
 
 		self.classes.insert((name.to_string(), None), klass.clone());

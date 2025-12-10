@@ -15,6 +15,7 @@ libloading = { workspace = true }
 libffi = { workspace = true }
 jni = { workspace = true }
 itertools = { workspace = true }
+colored = "3.0.0"
 
 [build-dependencies]
 bindgen = "0.72.1"

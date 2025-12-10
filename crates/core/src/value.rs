@@ -1,12 +1,13 @@
 use crate::objects::array::ArrayReference;
 use crate::objects::object::{ObjectReference, ReferenceKind};
-use crate::{BaseType, FieldType, VmError};
+use crate::{BaseType, FieldType};
 use core::fmt;
 use dashmap::DashMap;
 use jni::sys::{jboolean, jbyte, jchar, jdouble, jfloat, jint, jlong, jshort};
 use log::trace;
 use std::fmt::{Display, Formatter};
 use std::ops::Deref;
+use crate::error::VmError;
 
 /// A reference-counted, thread-safe pointer to an Object.
 
@@ -166,6 +167,13 @@ impl Value {
 
 	pub fn is_wide(&self) -> bool {
 		matches!(self, Value::Primitive(Primitive::Long(_) | Primitive::Double(_)))
+	}
+
+	pub fn as_ref_kind(&self) -> Option<ReferenceKind> {
+		match self {
+			Value::Reference(Some(kind)) => Some(kind.clone()),
+			_ => None,
+		}
 	}
 }
 

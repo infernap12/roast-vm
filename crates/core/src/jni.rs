@@ -1,17 +1,20 @@
+#![allow(unused_variables)]
 #![feature(c_variadic)]
 use crate::class::RuntimeClass;
 use crate::objects::array::ArrayReference;
-use crate::objects::object_manager::ObjectManager;
 use crate::prim::jboolean;
 use crate::thread::VmThread;
 use crate::value::{Primitive, Value};
-use jni::objects::JClass;
 use jni::sys::{jclass, jint, jobject, JNINativeInterface_};
 use jni::sys::{jstring, JNIEnv};
 use std::ffi::{c_char, CStr, CString};
-use std::mem;
 use std::ptr;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc};
+use crate::class_file::{FieldData, FieldRef};
+use crate::objects::object::{ ObjectReference, ReferenceKind};
+use crate::{BaseType, FieldType, MethodDescriptor};
+use jni::sys::*;
+use log::{error, info, trace, warn};
 
 const JNI_VERSION_1_1: jint = 0x00010001;
 const JNI_VERSION_1_2: jint = 0x00010002;
@@ -413,11 +416,7 @@ unsafe extern "system" fn register_natives(
 // JNI FUNCTION STUBS - All unimplemented functions below
 // ============================================================================
 
-use crate::class_file::{FieldData, FieldRef};
-use crate::objects::object::{Object, ObjectReference, ReferenceKind};
-use crate::{BaseType, FieldType, MethodDescriptor};
-use jni::sys::*;
-use log::{error, info, trace, warn};
+
 
 unsafe extern "system" fn define_class(
 	env: *mut JNIEnv,
@@ -1643,7 +1642,11 @@ unsafe extern "system" fn new_string_utf(env: *mut JNIEnv, utf: *const c_char) -
 			return ptr::null_mut();
 		};
 
-		let str_ref = thread.gc.write().unwrap().new_string(string_class, str);
+		let Ok(byte_array_class) = thread.get_class("[B") else {
+			return ptr::null_mut();
+		};
+
+		let str_ref = thread.gc.write().unwrap().new_string(byte_array_class, string_class, str);
 		str_ref
 	};
 
@@ -1687,7 +1690,7 @@ unsafe extern "system" fn new_object_array(
 		return ptr::null_mut();
 	};
 
-	let ArrayReference::Object(arr_ref) = gc.new_object_array(len) else {
+	let ArrayReference::Object(arr_ref) = gc.new_object_array(runtime_class, len) else {
 		return ptr::null_mut();
 	};
 	let arr_id = arr_ref.lock().unwrap().id;

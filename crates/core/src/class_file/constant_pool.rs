@@ -5,16 +5,13 @@ use crate::class_file::{
 	ConstantClassInfo, ConstantDynamicInfo, ConstantFieldrefInfo, ConstantInterfaceMethodrefInfo,
 	ConstantInvokeDynamicInfo, ConstantMethodHandleInfo, ConstantMethodTypeInfo,
 	ConstantMethodrefInfo, ConstantModuleInfo, ConstantNameAndTypeInfo, ConstantPackageInfo,
-	ConstantPoolEntry, ConstantStringInfo, ConstantUtf8Info, DescParseError, FieldInfo, FieldRef,
-	MethodInfo, MethodRef,
+	ConstantPoolEntry, ConstantStringInfo, ConstantUtf8Info, DescParseError, FieldInfo, FieldRef
+	, MethodRef,
 };
-use crate::{pool_get_impl, FieldType, MethodDescriptor, VmError};
+use crate::{pool_get_impl, FieldType, MethodDescriptor};
 use deku::DekuContainerRead;
-use log::trace;
 use std::fmt::{Display, Formatter};
-use std::ops::Deref;
-use std::str::FromStr;
-use std::sync::Arc;
+use crate::error::VmError;
 
 pub type ConstantPoolSlice = [ConstantPoolEntry];
 pub type ConstantPoolOwned = Vec<ConstantPoolEntry>;
@@ -92,6 +89,16 @@ pub trait ConstantPoolExt: ConstantPoolGet {
 
 	fn resolve_method_ref(&self, index: u16) -> Result<MethodRef, ConstantPoolError> {
 		let mr = self.get_method_ref(index)?;
+		let class = self.resolve_class_name(mr.class_index)?;
+		let name_and_type = self.get_name_and_type_info(mr.name_and_type_index)?;
+		let name = self.get_string(name_and_type.name_index)?;
+		let desc = self.get_string(name_and_type.descriptor_index)?;
+		let desc = MethodDescriptor::parse(&desc)?;
+		Ok(MethodRef { class, name, desc })
+	}
+
+	fn resolve_interface_method_ref(&self, index: u16) -> Result<MethodRef, ConstantPoolError> {
+		let mr = self.get_interface_method_ref(index)?;
 		let class = self.resolve_class_name(mr.class_index)?;
 		let name_and_type = self.get_name_and_type_info(mr.name_and_type_index)?;
 		let name = self.get_string(name_and_type.name_index)?;

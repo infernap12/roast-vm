@@ -11,12 +11,12 @@ use crate::class_file::{ClassFlags, MethodRef};
 use crate::class_loader::ClassLoader;
 use crate::objects::object_manager::ObjectManager;
 use crate::thread::VmThread;
-use crate::{MethodDescriptor, ThreadId, VmError};
+use crate::{MethodDescriptor, ThreadId};
 use dashmap::DashMap;
-use imp::{Library, Symbol};
+use imp::Library;
 use std::sync::{Arc, Mutex, RwLock};
-use crate::class::{InitState, RuntimeClass};
 use crate::objects::object::ReferenceKind;
+use crate::error::VmError;
 
 // struct AbstractObject<'a> {}
 pub struct Vm {
@@ -108,25 +108,45 @@ impl Vm {
 			// "jdk/internal/misc/UnsafeConstants"
 		];
 		let _ = classes.iter().map(|e| thread.get_or_resolve_class(e));
-		let prims = vec!["byte", "char", "double", "float", "int", "long", "short", "boolean"];
+		let prims = vec![
+			("byte", "B"),
+			("char", "C"),
+			("double", "D"),
+			("float", "F"),
+			("int", "I"),
+			("long", "J"),
+			("short", "S"),
+			("boolean", "Z")
+		];
 		let thread = self.threads.get(&self.main_thread_id).unwrap();
 
 		for prim in prims {
 			let klass =
-				self.loader.lock().unwrap().primitive_class(prim);
+				self.loader.lock().unwrap().primitive_class(prim.0);
 
 
 			let class_class = thread.get_class("java/lang/Class")?;
-			let string = thread.intern_string(&prim);
+			let name_obj = thread.intern_string(&prim.0);
 			let flags = ClassFlags::from(1041u16);
 			let class_obj = self.gc.write().unwrap().new_class(
+				class_class.clone(),
+				Some(ReferenceKind::ObjectReference(name_obj)),
+				None,
+				flags,
+				true
+			);
+			klass.mirror.set(class_obj.lock().unwrap().id).unwrap();
+
+			let prim_array_klass = self.loader.lock().unwrap().create_array_class(klass.clone());
+			let arr_name_obj = thread.intern_string(&prim_array_klass.this_class);
+			let arr_class_obj = self.gc.write().unwrap().new_class(
 				class_class,
-				Some(ReferenceKind::ObjectReference(string)),
+				Some(ReferenceKind::ObjectReference(arr_name_obj)),
 				None,
 				flags,
 				false
 			);
-			klass.mirror.set(class_obj.lock().unwrap().id).unwrap();
+			prim_array_klass.mirror.set(arr_class_obj.lock().unwrap().id).unwrap();
 		}
 
 		let phase1ref = MethodRef {
@@ -138,8 +158,8 @@ impl Vm {
 		Ok(())
 	}
 
-	pub fn run(&self, what: &str) {
-		self.boot_strap().expect("Failed to bootstrap vm!");
+	pub fn run(&self, what: &str) -> Result<(), VmError> {
+		self.boot_strap()?;
 		// Get main thread from DashMap
 		let thread = self.threads.get(&self.main_thread_id).unwrap().clone();
 		thread.invoke_main(what)

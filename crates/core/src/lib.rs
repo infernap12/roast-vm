@@ -15,9 +15,10 @@
 //! - [`MethodDescriptor`] - Method signature information
 //! - [`FieldType`] - Field type information
 
+use crate::error::{StackTraceElement, VmError};
 use crate::value::{OperandStack, Primitive};
 use crate::value::LocalVariables;
-use crate::attributes::{ArrayType, Attribute, CodeAttribute};
+use crate::attributes::{ArrayType, Attribute, CodeAttribute, LineNumberTableEntry};
 use crate::class_file::constant_pool::ConstantPoolExt;
 use crate::class_file::constant_pool::{ConstantPoolError, ConstantPoolGet};
 use crate::class_file::{Bytecode, ClassFile, ConstantPoolEntry, MethodData, MethodRef};
@@ -36,8 +37,9 @@ use std::fs::File;
 use std::io::Read;
 use std::ops::{BitAnd, Deref};
 use std::sync::{Arc, Mutex};
-use value::{Value};
+use value::Value;
 use vm::Vm;
+use crate::class::RuntimeClass;
 
 mod attributes;
 mod bimage;
@@ -54,6 +56,7 @@ mod rng;
 mod thread;
 pub mod value;
 pub mod vm;
+pub mod error;
 // const NULL: Value = Value::Reference(None);
 
 // include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
@@ -177,6 +180,9 @@ struct Frame {
 	thread: Arc<VmThread>,
 	// The mod being invoked
 	method_ref: MethodRef,
+
+	class: Arc<RuntimeClass>,
+	line_number_table: Option<Vec<LineNumberTableEntry>>
 }
 
 impl Display for Frame {
@@ -217,14 +223,29 @@ impl Frame {
 			Value::Padding => {panic!("We we pushing a pad?")}
 		}
 	}
+	fn current_line_number(&self) -> Option<u16> {
+		let table = self.line_number_table.as_ref()?;
+		// Find the entry where start_pc <= current pc
+		table.iter()
+			.rev()
+			.find(|entry| {
+				entry.start_pc as i64 <= self.pc
+				// (*start_pc as i64) <= self.pc)
+			})
+			.map(|entry| {
+				entry.line_number
+			})
+	}
 
 	// fn load_constant(index: u8) {}
 	fn new(
+		class: Arc<RuntimeClass>,
 		method_ref: MethodRef,
 		code_attr: CodeAttribute,
 		pool: Arc<Vec<ConstantPoolEntry>>,
-		mut locals: Vec<Value>,
+		locals: Vec<Value>,
 		vm: Arc<Vm>,
+		line_number_table: Option<Vec<LineNumberTableEntry>>
 	) -> Self {
 		// Get current thread from thread-local storage
 		let thread = VmThread::current(&vm);
@@ -244,10 +265,12 @@ impl Frame {
 			bytecode,
 			thread,
 			method_ref,
+			class,
+			line_number_table
 		}
 	}
-	fn execute(&mut self) -> Result<Option<Value>, VmError> {
-		let binding = self.bytecode.code.clone();
+	fn execute(&mut self) -> Result<Option<Value>, error::VmError> {
+				let binding = self.bytecode.code.clone();
 		loop {
 			let (offset, op) = self.next().expect("No ops :(");
 			info!("pre set: {}", self.pc);
@@ -265,14 +288,25 @@ impl Frame {
 				}
 				Ok(_) => self.pc += 1,
 				Err(x) => {
+					return Err(x.with_frame(StackTraceElement {
+						class: self.class.this_class.clone(),
+						method: self.method_ref.name.clone(),
+						file: self.class.source_file.clone(),
+						line: self.current_line_number(),
+					}));
+					eprintln!("[DEBUG] frame.thread.id = {:?}", self.thread.id);
+					eprintln!("[DEBUG] frame.thread.frame_stack.len = {}",
+							  self.thread.frame_stack.lock().unwrap().len());
 					let objs = self.thread.gc.read().unwrap()
 						.objects
 						.iter()
 						.map(|(x, y)| format!("{x} : {y}"))
 						.collect::<Vec<_>>();
 					let len = objs.len().clone();
-					error!("Error in method: {:#?}", self.method_ref);
 					error!("Heap dump: len: {len} objs:\n{objs:#?}");
+					error!("Error in method: {:?}", self.method_ref);
+					error!("Error in VM: {x}");
+					self.thread.print_stack_trace();
 					panic!("Mission failed, we'll get em next time:\n{x}")
 				}
 			}
@@ -290,7 +324,7 @@ impl Frame {
 					.join(", ")
 			);
 		}
-		Err(VmError::ExecutionError)
+		Err(error::VmError::ExecutionError)
 	}
 
 	fn next(&mut self) -> Option<(u16, Ops)> {
@@ -491,53 +525,12 @@ enum ExecutionResult {
 	Return(()),
 	ReturnValue(Value),
 }
-#[derive(Debug)]
-pub enum VmError {
-	ConstantPoolError(String),
-	StackError(String),
-	InvariantError(String),
-	DekuError(DekuError),
-	LoaderError(String),
-	ExecutionError,
-	NativeError(String),
-}
-
-impl VmError {
-	pub fn stack_not_int() -> Self {
-		Self::InvariantError("Value on stack was not an int".to_string())
-	}
-}
-
-impl Display for VmError {
-	fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-		match self {
-			VmError::ConstantPoolError(msg) => write!(f, "Constant pool error: {}", msg),
-			VmError::StackError(msg) => write!(f, "Stack error: {}", msg),
-			VmError::InvariantError(msg) => write!(f, "Invariant error: {}", msg),
-			VmError::DekuError(err) => write!(f, "Deku error: {}", err),
-			VmError::LoaderError(msg) => write!(f, "Loader error: {}", msg),
-			VmError::ExecutionError => write!(f, "Execution error"),
-			VmError::NativeError(msg) => write!(f, "Native error {msg}"),
-		}
-	}
-}
-
-impl From<ConstantPoolError> for VmError {
-	fn from(value: ConstantPoolError) -> Self {
-		Self::ConstantPoolError(value.to_string())
-	}
-}
-impl From<DekuError> for VmError {
-	fn from(value: DekuError) -> Self {
-		Self::DekuError(value)
-	}
-}
 
 impl Frame {
-	fn pop(&mut self) -> Result<Value, VmError>{
+	fn pop(&mut self) -> Result<Value, error::VmError>{
 		self.stack.pop()
 	}
-	fn execute_instruction(&mut self, op: Ops) -> Result<ExecutionResult, VmError> {
+	fn execute_instruction(&mut self, op: Ops) -> Result<ExecutionResult, error::VmError> {
 		match op {
 			Ops::nop => {
 				// TODO Should nop have any side effects?
@@ -758,7 +751,23 @@ impl Frame {
 				Ok(ExecutionResult::Continue)
 			}
 			Ops::baload => {
-				todo!("boolean array load")
+				let Value::Primitive(Primitive::Int(index)) = self.pop()? else {
+					panic!("index on stack was not int")
+				};
+				let arr_ref = self.pop()?;
+				let value = match arr_ref {
+					Value::Reference(Some(ReferenceKind::ArrayReference(ArrayReference::Byte(arr)))) => {
+						let b = arr.lock().unwrap().get(index);
+						Value::from(b as i32)
+					}
+					Value::Reference(Some(ReferenceKind::ArrayReference(ArrayReference::Boolean(arr)))) => {
+						let b = arr.lock().unwrap().get(index);
+						Value::from(b as i32)
+					}
+					_ => panic!("Reference not on stack or not a byte/boolean array"),
+				};
+				self.push(value);
+				Ok(ExecutionResult::Continue)
 			}
 			Ops::caload => {
 				let Value::Primitive(Primitive::Int(index)) = self.pop()? else {
@@ -771,7 +780,7 @@ impl Frame {
 					panic!("Reference not on stack or not a char array")
 				};
 				let c = arr.lock().unwrap().get(index);
-				self.push(Value::from(c));
+				self.push(Value::from(c as i32));
 				Ok(ExecutionResult::Continue)
 			}
 			Ops::saload => {
@@ -886,7 +895,7 @@ impl Frame {
 			Ops::pop => {
 				let v1 = self.pop()?;
 				if v1.is_wide() {
-					Err(VmError::InvariantError("Op:pop on single wide value".to_string()))
+					Err(error::VmError::InvariantError("Op:pop on single wide value".to_string()))
 				} else { Ok(ExecutionResult::Continue) }
 			}
 			Ops::pop2 => {
@@ -898,7 +907,7 @@ impl Frame {
 					let _v2 = self.pop()?;
 					let v1 = self.pop()?;
 					if v1.is_wide() {
-						Err(VmError::InvariantError("Op:pop2 popped a 2wide on second pop".to_string()))
+						Err(error::VmError::InvariantError("Op:pop2 popped a 2wide on second pop".to_string()))
 					} else { Ok(ExecutionResult::Continue) }
 				}
 			}
@@ -906,7 +915,7 @@ impl Frame {
 				let v1 = self.pop()?;
 				let v2 = self.pop()?;
 				if v1.is_wide() || v2.is_wide() {
-					Err(VmError::InvariantError("dup_x1 operated on 2 wide value".to_string()))
+					Err(error::VmError::InvariantError("dup_x1 operated on 2 wide value".to_string()))
 				} else {
 					self.push(v1.clone());
 					self.push(v2);
@@ -918,14 +927,14 @@ impl Frame {
 				let v1 = self.pop()?;
 				let v2 = self.pop()?;
 				if v1.is_wide() {
-					Err(VmError::InvariantError("dup_x2 operated on 1st 2 wide value".to_string()))
+					Err(error::VmError::InvariantError("dup_x2 operated on 1st 2 wide value".to_string()))
 				} else if v2.is_wide() {
 					self.push(v1.clone());
 					self.push(v2);
 					self.push(v1);
 					Ok(ExecutionResult::Continue)
 				} else if self.stack.peek()?.is_wide() {
-					Err(VmError::InvariantError("dup_x2 operated on 3rd 2 wide value".to_string()))
+					Err(error::VmError::InvariantError("dup_x2 operated on 3rd 2 wide value".to_string()))
 				}
 				else {
 					let v3 = self.pop()?;
@@ -941,7 +950,7 @@ impl Frame {
 					self.stack.push(value.clone());
 					Ok(ExecutionResult::Continue)
 				} else {
-					Err(VmError::StackError("Stack underflow".to_string()))
+					Err(error::VmError::StackError("Stack underflow".to_string()))
 				}
 			}
 			Ops::dup2 => {
@@ -951,7 +960,7 @@ impl Frame {
 					self.push(v1);
 					Ok(ExecutionResult::Continue)
 				} else if self.stack.peek()?.is_wide() {
-					Err(VmError::InvariantError("dup2 operated on 2nd, 2 wide value".to_string()))
+					Err(error::VmError::InvariantError("dup2 operated on 2nd, 2 wide value".to_string()))
 				} else {
 					let v2 = self.pop()?;
 					self.push(v2.clone());
@@ -968,7 +977,7 @@ impl Frame {
 					// v1 is category 2, v2 must be category 1
 					let v2 = self.pop()?;
 					if v2.is_wide() {
-						Err(VmError::InvariantError("dup2_x1 form 2: v2 must be category 1".to_string()))
+						Err(error::VmError::InvariantError("dup2_x1 form 2: v2 must be category 1".to_string()))
 					} else {
 						self.push(v1.clone());
 						self.push(v2);
@@ -980,11 +989,11 @@ impl Frame {
 					// all must be category 1
 					let v2 = self.pop()?;
 					if v2.is_wide() {
-						Err(VmError::InvariantError("dup2_x1 form 1: v2 must be category 1".to_string()))
+						Err(error::VmError::InvariantError("dup2_x1 form 1: v2 must be category 1".to_string()))
 					} else {
 						let v3 = self.pop()?;
 						if v3.is_wide() {
-							Err(VmError::InvariantError("dup2_x1 form 1: v3 must be category 1".to_string()))
+							Err(error::VmError::InvariantError("dup2_x1 form 1: v3 must be category 1".to_string()))
 						} else {
 							self.push(v2.clone());
 							self.push(v1.clone());
@@ -1012,7 +1021,7 @@ impl Frame {
 						// v1 is category 2, v2 and v3 are category 1
 						let v3 = self.pop()?;
 						if v3.is_wide() {
-							Err(VmError::InvariantError("dup2_x2 form 2: v3 must be category 1".to_string()))
+							Err(error::VmError::InvariantError("dup2_x2 form 2: v3 must be category 1".to_string()))
 						} else {
 							self.push(v1.clone());
 							self.push(v3);
@@ -1023,7 +1032,7 @@ impl Frame {
 					}
 				} else if v2.is_wide() {
 					// v1 category 1, v2 category 2 - no valid form for this
-					Err(VmError::InvariantError("dup2_x2: invalid - v1 cat1, v2 cat2".to_string()))
+					Err(error::VmError::InvariantError("dup2_x2: invalid - v1 cat1, v2 cat2".to_string()))
 				} else {
 					// v1 and v2 are both category 1
 					let v3 = self.pop()?;
@@ -1041,7 +1050,7 @@ impl Frame {
 						// all category 1
 						let v4 = self.pop()?;
 						if v4.is_wide() {
-							Err(VmError::InvariantError("dup2_x2 form 1: v4 must be category 1".to_string()))
+							Err(error::VmError::InvariantError("dup2_x2 form 1: v4 must be category 1".to_string()))
 						} else {
 							self.push(v2.clone());
 							self.push(v1.clone());
@@ -1058,7 +1067,7 @@ impl Frame {
 				let v1 = self.pop()?;
 				let v2 = self.pop()?;
 				if v1.is_wide() || v2.is_wide() {
-					Err(VmError::InvariantError("swap operated on 2 wide value".to_string()))
+					Err(error::VmError::InvariantError("swap operated on 2 wide value".to_string()))
 				} else {
 					self.push(v1);
 					self.push(v2);
@@ -1125,7 +1134,7 @@ impl Frame {
 					self.vars.set(index as usize, new_val.into());
 					Ok(ExecutionResult::Continue)
 				} else {
-					Err(VmError::InvariantError("iinc requires integer value".to_string()))
+					Err(error::VmError::InvariantError("iinc requires integer value".to_string()))
 				}
 			}
 
@@ -1151,10 +1160,10 @@ impl Frame {
 			// Comparisons
 			Ops::lcmp => {
 				let Value::Primitive(Primitive::Long(v2)) = self.pop()? else {
-					return Err(VmError::StackError("Expected long".into()));
+					return Err(error::VmError::StackError("Expected long".into()));
 				};
 				let Value::Primitive(Primitive::Long(v1)) = self.pop()? else {
-					return Err(VmError::StackError("Expected long".into()));
+					return Err(error::VmError::StackError("Expected long".into()));
 				};
 
 				let result: i32 = match v1.cmp(&v2) {
@@ -1194,7 +1203,7 @@ impl Frame {
 						Ok(ExecutionResult::Continue)
 					}
 				} else {
-					Err(VmError::stack_not_int())
+					Err(error::VmError::stack_not_int())
 				}
 			}
 			Ops::if_acmpne(offset) => {
@@ -1207,7 +1216,7 @@ impl Frame {
 						Ok(ExecutionResult::Continue)
 					}
 				} else {
-					Err(VmError::stack_not_int())
+					Err(error::VmError::stack_not_int())
 				}
 			}
 			// Control
@@ -1240,7 +1249,7 @@ impl Frame {
 					Value::Primitive(Primitive::Char(v)) => v as i32,
 					Value::Primitive(Primitive::Short(v)) => v as i32,
 					_ => {
-						return Err(VmError::InvariantError(
+						return Err(error::VmError::InvariantError(
 							"ireturn requires integer-compatible value".to_owned(),
 						))
 					}
@@ -1253,11 +1262,11 @@ impl Frame {
 						BaseType::Char => Ok(ExecutionResult::ReturnValue((x as u16).into())),
 						BaseType::Short => Ok(ExecutionResult::ReturnValue((x as i16).into())),
 						BaseType::Int => Ok(ExecutionResult::ReturnValue(x.into())),
-						_ => Err(VmError::InvariantError(
+						_ => Err(error::VmError::InvariantError(
 							"wrong return instruction for method".to_owned(),
 						)),
 					},
-					_ => Err(VmError::InvariantError(
+					_ => Err(error::VmError::InvariantError(
 						"wrong return instruction for method".to_owned(),
 					)),
 				}
@@ -1266,28 +1275,28 @@ impl Frame {
 				let val = self.pop()?;
 				match val {
 					Value::Primitive(Primitive::Long(_)) => Ok(ExecutionResult::ReturnValue(val)),
-					_ => Err(VmError::StackError("Expected reference".into())),
+					_ => Err(error::VmError::StackError("Expected reference".into())),
 				}
 			}
 			Ops::freturn => {
 				let val = self.pop()?;
 				match val {
 					Value::Primitive(Primitive::Float(_)) => Ok(ExecutionResult::ReturnValue(val)),
-					_ => Err(VmError::StackError("Expected reference".into())),
+					_ => Err(error::VmError::StackError("Expected reference".into())),
 				}
 			}
 			Ops::dreturn => {
 				let val = self.pop()?;
 				match val {
 					Value::Primitive(Primitive::Double(_)) => Ok(ExecutionResult::ReturnValue(val)),
-					_ => Err(VmError::StackError("Expected reference".into())),
+					_ => Err(error::VmError::StackError("Expected reference".into())),
 				}
 			}
 			Ops::areturn => {
 				let val = self.pop()?;
 				match val {
 					Value::Reference(_) => Ok(ExecutionResult::ReturnValue(val)),
-					_ => Err(VmError::StackError("Expected reference".into())),
+					_ => Err(error::VmError::StackError("Expected reference".into())),
 				}
 			}
 			Ops::return_void => Ok(ExecutionResult::Return(())),
@@ -1298,8 +1307,10 @@ impl Frame {
 			// can init the field
 			Ops::getstatic(index) => {
 				let field_ref = self.pool.resolve_field(index)?;
+				if field_ref.class.contains("jdk/internal/misc/VM") || field_ref.name.contains("initLevel") {
+					return Err(VmError::InvariantError("Intentional crash".to_string()))
+				}
 				println!("Getting static field {field_ref:?}");
-
 				let init_class = self
 					.thread
 					.get_or_resolve_class(&field_ref.class)
@@ -1339,7 +1350,7 @@ impl Frame {
 				let popped = self.pop()?;
 				match popped {
 					Value::Primitive(x) => {
-						Err(VmError::StackError("Getfield era".parse().unwrap()))
+						Err(error::VmError::StackError("Getfield era".parse().unwrap()))
 					}
 					Value::Reference(x) => {
 						match x {
@@ -1352,7 +1363,7 @@ impl Frame {
 									Ok(ExecutionResult::Continue)
 								}
 								ReferenceKind::ArrayReference(_) => {
-									Err(VmError::StackError("get field".parse().unwrap()))
+									Err(error::VmError::StackError("get field".parse().unwrap()))
 								}
 							},
 						}
@@ -1393,10 +1404,10 @@ impl Frame {
 						object.lock().unwrap().set_field(&field_ref.name, value);
 						Ok(ExecutionResult::Continue)
 					} else {
-						Err(VmError::StackError("Null pointer exception".to_string()))
+						Err(error::VmError::StackError("Null pointer exception".to_string()))
 					}
 				} else {
-					Err(VmError::StackError(
+					Err(error::VmError::StackError(
 						"putfield tried to operate on a non object stack value".to_string(),
 					))
 				}
@@ -1405,6 +1416,7 @@ impl Frame {
 			}
 			Ops::invokevirtual(index) => {
 				let method_ref = self.pool.resolve_method_ref(index)?;
+
 				// the 1 represents the receiver
 				let args_count = method_ref.desc.arg_width() + 1;
 				let args = self.stack.pop_n(args_count)?;
@@ -1412,7 +1424,7 @@ impl Frame {
 				if let Some(val) = result {
 					self.push(val)
 				}
-				// todo!("Finish invoke virtual");
+
 				Ok(ExecutionResult::Continue)
 			}
 
@@ -1428,7 +1440,7 @@ impl Frame {
 				if let Some(val) = result {
 					self.push(val)
 				}
-				// todo!("invoke special");
+
 				Ok(ExecutionResult::Continue)
 			}
 
@@ -1446,8 +1458,21 @@ impl Frame {
 				Ok(ExecutionResult::Continue)
 			}
 
-			Ops::invokeinterface(_, _, _) => {
-				todo!("invokeInterface")
+			Ops::invokeinterface(index, count, _zero) => {
+				let method_ref = self.pool.resolve_interface_method_ref(index)?;
+
+				// the 1 represents the receiver
+				let args_count = method_ref.desc.arg_width() + 1;
+				let args = self.stack.pop_n(args_count)?;
+				let refe = args.first().expect("Must have reciever").as_ref_kind().expect("Must be ref");
+				let class = refe.class();
+
+				let result = self.thread.invoke_virtual(method_ref, class.clone(), args)?;
+				if let Some(val) = result {
+					self.push(val)
+				}
+
+				Ok(ExecutionResult::Continue)
 			}
 
 			Ops::invokedynamic(_, _) => {
@@ -1469,6 +1494,11 @@ impl Frame {
 			}
 
 			Ops::newarray(array_type) => {
+				let array_class = self.thread.get_or_resolve_class(&array_type.to_string())?;
+
+
+
+
 				let value = self.stack.pop().expect("value to have stack");
 				let Value::Primitive(Primitive::Int(count)) = value else {
 					panic!("stack item was not int")
@@ -1478,7 +1508,7 @@ impl Frame {
 					.gc
 					.write()
 					.unwrap()
-					.new_primitive_array(array_type.clone(), count);
+					.new_primitive_array(array_class, array_type.clone(), count);
 				self.stack
 					.push(Value::Reference(Some(ReferenceKind::ArrayReference(array))));
 				Ok(ExecutionResult::Continue)
@@ -1486,12 +1516,12 @@ impl Frame {
 			Ops::anewarray(index) => {
 				let class_name = self.pool.resolve_class_name(index)?;
 				println!("{}", class_name);
-				// let array_class = self.thread.loader.get_or_create_array_class(class_name)?;
+				let array_class = self.thread.get_or_resolve_class(&class_name)?;
 				let value = self.stack.pop().expect("value to have stack");
 				let Value::Primitive(Primitive::Int(count)) = value else {
 					panic!("stack item was not int")
 				};
-				let array = self.thread.gc.write().unwrap().new_object_array(count);
+				let array = self.thread.gc.write().unwrap().new_object_array(array_class, count);
 				self.stack
 					.push(Value::Reference(Some(ReferenceKind::ArrayReference(array))));
 				Ok(ExecutionResult::Continue)
@@ -1516,10 +1546,19 @@ impl Frame {
 					match x {
 						ReferenceKind::ObjectReference(obj) => {
 							if obj.lock().unwrap().class.is_assignable_into(into_class) { self.push(popped); Ok(ExecutionResult::Continue) } else { todo!("Error path") }
-
 						}
 						ReferenceKind::ArrayReference(arr) => {
-							todo!("Arrays")
+							let array_class = arr.class();
+							if array_class.is_assignable_into(into_class.clone()) {
+								self.push(popped);
+								Ok(ExecutionResult::Continue)
+							} else {
+								Err(VmError::Exception {
+									message: format!("ClassCastException: {} cannot be cast to {}",
+													 array_class.this_class, into_class.this_class),
+									stack_trace: vec![],
+								})
+							}
 						}
 					}
 				} else { self.push(popped); Ok(ExecutionResult::Continue) }
@@ -1535,7 +1574,13 @@ impl Frame {
 							Ok(ExecutionResult::Continue)
 						}
 						ReferenceKind::ArrayReference(arr) => {
-							todo!("Arrays")
+							let array_class = arr.class();
+							if array_class.is_assignable_into(into_class) {
+								self.push(1i32.into());
+							} else {
+								self.push(0i32.into());
+							}
+							Ok(ExecutionResult::Continue)
 						}
 					}
 				} else { panic!("yeet") }
@@ -1561,7 +1606,7 @@ impl Frame {
 						Ok(ExecutionResult::Continue)
 					}
 				} else {
-					Err(VmError::stack_not_int())
+					Err(error::VmError::stack_not_int())
 				}
 			}
 			Ops::ifnonnull(offset) => {
@@ -1572,7 +1617,7 @@ impl Frame {
 						Ok(ExecutionResult::Continue)
 					}
 				} else {
-					Err(VmError::stack_not_int())
+					Err(error::VmError::stack_not_int())
 				}
 			}
 			Ops::goto_w(_) => {
@@ -1593,7 +1638,7 @@ impl Frame {
 		}
 	}
 
-	fn load_constant(&mut self, index: u16) -> Result<ExecutionResult, VmError> {
+	fn load_constant(&mut self, index: u16) -> Result<ExecutionResult, error::VmError> {
 		let thing = self.pool.get_constant(index.to_owned())?;
 		trace!("\tLoading constant: {}", thing);
 		let resolved = match thing {
@@ -1602,7 +1647,7 @@ impl Frame {
 			ConstantPoolEntry::Class(x) => {
 				let name = self.pool.get_string(x.name_index)?;
 				let class = self.thread.get_or_resolve_class(&name)?;
-				let class_ref = self.thread.gc.read().unwrap().get(*class.mirror.wait());
+				let class_ref = self.thread.gc.read().unwrap().get(*class.mirror.get().expect(&format!("Mirror unintialised {}", class.this_class)));
 				Value::from(class_ref)
 			}
 			ConstantPoolEntry::String(x) => {
